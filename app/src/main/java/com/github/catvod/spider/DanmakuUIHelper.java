@@ -1985,7 +1985,7 @@ public class DanmakuUIHelper {
             @Override
             public boolean onLongClick(View v) {
                 DanmakuItem item = (DanmakuItem) v.getTag();
-                Utils.safeShowToast(activity, item.getTitleWithEp());
+                Utils.safeShowToast(activity, item.getTitleWithEp(),  true);
                 return true;
             }
         });
@@ -2165,7 +2165,7 @@ public class DanmakuUIHelper {
             @Override
             public boolean onLongClick(View v) {
                 DanmakuItem item = (DanmakuItem) v.getTag();
-                Utils.safeShowToast(activity, item.getTitleWithEp());
+                Utils.safeShowToast(activity, item.getTitleWithEp(),  true);
                 return true;
             }
         });
