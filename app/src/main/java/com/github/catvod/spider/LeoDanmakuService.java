@@ -1,8 +1,6 @@
 package com.github.catvod.spider;
 
 import android.app.Activity;
-import android.content.Context;
-import android.os.Handler;
 import android.os.Looper;
 import android.text.TextUtils;
 
@@ -21,13 +19,17 @@ import java.util.concurrent.*;
 public class LeoDanmakuService {
 
     // 线程池
-    private static final ExecutorService searchExecutor = Executors.newFixedThreadPool(4);
+    private static final ExecutorService searchExecutor = Executors.newFixedThreadPool(8);
     // 优化防重复推送：针对每个URL记录推送时间
     private static final Map<String, Long> lastPushTimes = new ConcurrentHashMap<>();
     private static final long PUSH_MIN_INTERVAL = 3000; // 3秒内不重复推送
-
-    // 在 LeoDanmakuService 类中添加缓存相关字段
-    private static final long CACHE_EXPIRE_TIME = 30 * 60 * 1000; // 30分钟
+    private static final int AUTO_SEARCH_TIMEOUT_MS = 30000;
+    private static final int MANUAL_SEARCH_TIMEOUT_MS = 30000;
+    private static final int AUTO_SEARCH_HTTP_TIMEOUT_MS = 30000;
+    private static final int MANUAL_SEARCH_HTTP_TIMEOUT_MS = 10000;
+    private static final int AUTO_SEARCH_MAX_THREADS = 16;
+    private static final int AUTO_EMPTY_POLL_MS = 1500;
+    private static final int MANUAL_EMPTY_POLL_MS = 8000;
     private static final double AUTO_SOURCE_CONFIDENCE_THRESHOLD = 0.85;
 
     // 新增：搜索结果封装类
@@ -63,17 +65,13 @@ public class LeoDanmakuService {
         }
     }
 
-    private static class SourceSearchResult {
-        String apiBase;
+    private static class AutoSourceSearchResult {
         String apiSourceName;
         List<DanmakuItem> items;
-        long latencyMs;
 
-        SourceSearchResult(String apiBase, String apiSourceName, List<DanmakuItem> items, long latencyMs) {
-            this.apiBase = apiBase;
+        AutoSourceSearchResult(String apiSourceName, List<DanmakuItem> items) {
             this.apiSourceName = apiSourceName;
             this.items = items;
-            this.latencyMs = latencyMs;
         }
     }
 
@@ -88,6 +86,9 @@ public class LeoDanmakuService {
         String keyword = episodeInfo.getEpisodeNames().get(0);
 
         final List<DanmakuItem> globalResults = Collections.synchronizedList(new ArrayList<DanmakuItem>());
+        final List<java.util.concurrent.Future<List<DanmakuItem>>> submittedTasks = new ArrayList<>();
+        ExecutorService executor = searchExecutor;
+        boolean shutdownExecutor = false;
 
         try {
             DanmakuConfig config = DanmakuConfigManager.getConfig(activity);
@@ -97,47 +98,48 @@ public class LeoDanmakuService {
                 Utils.safeShowToast(activity, "没有启用的API地址");
                 return globalResults;
             }
-            final Context appContext = activity != null ? activity.getApplicationContext() : null;
 
-            ExecutorCompletionService<SourceSearchResult> completionService =
-                    new ExecutorCompletionService<>(searchExecutor);
+            if (useEpisodeNum) {
+                int threadCount = Math.max(1, Math.min(targets.size(), AUTO_SEARCH_MAX_THREADS));
+                executor = Executors.newFixedThreadPool(threadCount);
+                shutdownExecutor = true;
+            }
+
+            ExecutorCompletionService<List<DanmakuItem>> completionService =
+                    new ExecutorCompletionService<>(executor);
             int pendingTasks = 0;
 
             for (final DanmakuApiSource source : targets) {
-                completionService.submit(new Callable<SourceSearchResult>() {
+                java.util.concurrent.Future<List<DanmakuItem>> future = completionService.submit(new Callable<List<DanmakuItem>>() {
                     @Override
-                    public SourceSearchResult call() throws Exception {
-                        long start = System.currentTimeMillis();
+                    public List<DanmakuItem> call() throws Exception {
                         List<DanmakuItem> items = doSearch(source.url, episodeInfo, useEpisodeNum);
                         attachApiSourceName(items, source.name);
-                        return new SourceSearchResult(source.url, source.name, items, System.currentTimeMillis() - start);
+                        return items;
                     }
                 });
+                submittedTasks.add(future);
                 pendingTasks++;
             }
 
             // 超时控制
-            long endTime = System.currentTimeMillis() + 30000;
+            long endTime = System.currentTimeMillis() + (useEpisodeNum ? AUTO_SEARCH_TIMEOUT_MS : MANUAL_SEARCH_TIMEOUT_MS);
 
             while (pendingTasks > 0) {
                 long timeLeft = endTime - System.currentTimeMillis();
                 if (timeLeft <= 0) break;
 
                 try {
-                    long wait = globalResults.isEmpty() ? 8000 : 50;
+                    long wait = globalResults.isEmpty()
+                            ? (useEpisodeNum ? AUTO_EMPTY_POLL_MS : MANUAL_EMPTY_POLL_MS)
+                            : 50;
                     if (wait > timeLeft) wait = timeLeft;
 
-                    java.util.concurrent.Future<SourceSearchResult> future =
+                    java.util.concurrent.Future<List<DanmakuItem>> future =
                             completionService.poll(wait, TimeUnit.MILLISECONDS);
                     if (future != null) {
-                        SourceSearchResult taskResult = future.get();
+                        List<DanmakuItem> res = future.get();
                         pendingTasks--;
-                        List<DanmakuItem> res = taskResult != null ? taskResult.items : null;
-                        if (taskResult != null && appContext != null) {
-                            boolean success = res != null && !res.isEmpty();
-                            DanmakuConfigManager.recordApiSourceResult(appContext, taskResult.apiBase, success,
-                                    taskResult.latencyMs, success ? "" : "无匹配结果");
-                        }
 
                         if (res != null && !res.isEmpty()) {
                             filterByKeyword(res, keyword);
@@ -156,26 +158,20 @@ public class LeoDanmakuService {
             }
         } catch (Exception e) {
             DanmakuSpider.log("搜索异常: " + e.getMessage());
+        } finally {
+            if (useEpisodeNum) {
+                for (java.util.concurrent.Future<List<DanmakuItem>> future : submittedTasks) {
+                    if (future != null && !future.isDone()) future.cancel(true);
+                }
+            }
+            if (shutdownExecutor && executor != null) {
+                executor.shutdownNow();
+            }
         }
 
         updateLastDanmakuItems(globalResults);
 
         return globalResults;
-    }
-
-    private static List<DanmakuItem> searchSingleSource(String apiBase, String apiSourceName, EpisodeInfo episodeInfo, boolean useEpisodeNum, Context appContext, String keyword) {
-        long start = System.currentTimeMillis();
-        List<DanmakuItem> res = doSearch(apiBase, episodeInfo, useEpisodeNum);
-        attachApiSourceName(res, apiSourceName);
-        long latencyMs = System.currentTimeMillis() - start;
-        if (appContext != null) {
-            boolean success = res != null && !res.isEmpty();
-            DanmakuConfigManager.recordApiSourceResult(appContext, apiBase, success, latencyMs, success ? "" : "无匹配结果");
-        }
-        if (res != null && !res.isEmpty()) {
-            filterByKeyword(res, keyword);
-        }
-        return res != null ? res : new ArrayList<DanmakuItem>();
     }
 
     private static void filterByKeyword(List<DanmakuItem> items, String keyword) {
@@ -238,7 +234,7 @@ public class LeoDanmakuService {
             }
             DanmakuSpider.log("搜索URL: " + searchUrl);
 
-            String json = NetworkUtils.robustHttpGet(searchUrl);
+            String json = getSearchResponse(searchUrl, useEpisodeNum);
 
             // 回退到旧API
             if (TextUtils.isEmpty(json)) {
@@ -249,7 +245,7 @@ public class LeoDanmakuService {
                     searchUrl += "&episode=" + URLEncoder.encode(episodeInfo.getEpisodeNum(), "UTF-8");
                 }
                 DanmakuSpider.log("回退搜索URL: " + searchUrl);
-                json = NetworkUtils.robustHttpGet(searchUrl);
+                json = getSearchResponse(searchUrl, useEpisodeNum);
             }
 
             if (TextUtils.isEmpty(json)) {
@@ -314,6 +310,18 @@ public class LeoDanmakuService {
         }
 
         return list;
+    }
+
+    private static String getSearchResponse(String searchUrl, boolean isAuto) {
+        int timeoutMs = isAuto ? AUTO_SEARCH_HTTP_TIMEOUT_MS : MANUAL_SEARCH_HTTP_TIMEOUT_MS;
+        NetworkUtils.HttpResult result = NetworkUtils.httpGet(searchUrl, timeoutMs);
+        if (result.isOk()) return result.body;
+        if (result.code > 0) {
+            DanmakuSpider.log("HTTP " + result.code + ": " + searchUrl);
+        } else {
+            DanmakuSpider.log("网络请求失败: " + searchUrl + " - " + result.error);
+        }
+        return "";
     }
 
     public static ApiSourceTestResult testApiSource(String apiBase) {
@@ -401,43 +409,101 @@ public class LeoDanmakuService {
             return new SearchResult(false, 0, null);
         }
 
-        DanmakuConfig config = DanmakuConfigManager.getConfig(activity);
-        List<DanmakuApiSource> sources = config != null ? config.getEnabledApiSources() : new ArrayList<DanmakuApiSource>();
-        if (sources.isEmpty()) {
-            DanmakuSpider.log("没有启用的API地址");
-            Utils.safeShowToast(activity, "没有启用的API地址");
-            return new SearchResult(false, 0, null);
-        }
-
-        Context appContext = activity != null ? activity.getApplicationContext() : null;
         EpisodeInfo queryInfo = copyEpisodeInfoForKeyword(episodeInfo, searchKeyword);
-        List<DanmakuItem> allResults = new ArrayList<>();
-        SearchResult bestFallback = null;
+        return autoSearchFirstMatchedSource(searchKeyword, queryInfo, activity);
+    }
 
-        for (DanmakuApiSource source : sources) {
-            String sourceLabel = source.getDisplayName("API源#" + (source.priority + 1));
-            DanmakuSpider.log("🔍 自动匹配使用" + sourceLabel + ": " + source.url);
-            List<DanmakuItem> sourceResults = searchSingleSource(source.url, source.name, queryInfo, true, appContext, searchKeyword);
-            allResults.addAll(sourceResults);
+    private static SearchResult autoSearchFirstMatchedSource(String searchKeyword, EpisodeInfo queryInfo, Activity activity) {
+        List<DanmakuItem> finishedResults = new ArrayList<>();
+        List<java.util.concurrent.Future<AutoSourceSearchResult>> submittedTasks = new ArrayList<>();
+        ExecutorService executor = null;
 
-            SearchResult sourceBest = pickBestAutoMatch(searchKeyword, queryInfo, sourceResults, sourceLabel);
-            if (!sourceBest.found) continue;
-
-            if (sourceBest.similarity >= AUTO_SOURCE_CONFIDENCE_THRESHOLD) {
-                updateLastDanmakuItems(allResults);
-                DanmakuSpider.log("✅ 高优先级API源可靠命中，停止兜底搜索: " + source.url + " (相似度: " + sourceBest.similarity + ")");
-                return sourceBest;
+        try {
+            DanmakuConfig config = DanmakuConfigManager.getConfig(activity);
+            List<DanmakuApiSource> sources = config != null ? config.getEnabledApiSources() : new ArrayList<DanmakuApiSource>();
+            if (sources.isEmpty()) {
+                DanmakuSpider.log("没有启用的API地址");
+                Utils.safeShowToast(activity, "没有启用的API地址");
+                return new SearchResult(false, 0, null);
             }
 
-            if (bestFallback == null || sourceBest.similarity > bestFallback.similarity) {
-                bestFallback = sourceBest;
-            }
-        }
+            int threadCount = Math.max(1, Math.min(sources.size(), AUTO_SEARCH_MAX_THREADS));
+            executor = Executors.newFixedThreadPool(threadCount);
+            ExecutorCompletionService<AutoSourceSearchResult> completionService =
+                    new ExecutorCompletionService<>(executor);
 
-        updateLastDanmakuItems(allResults);
-        if (bestFallback != null) {
-            DanmakuSpider.log("🏁 各API源未达到可靠阈值，返回全局最佳候选 (相似度: " + bestFallback.similarity + ")");
-            return bestFallback;
+            int pendingTasks = 0;
+            for (final DanmakuApiSource source : sources) {
+                java.util.concurrent.Future<AutoSourceSearchResult> future =
+                        completionService.submit(new Callable<AutoSourceSearchResult>() {
+                            @Override
+                            public AutoSourceSearchResult call() throws Exception {
+                                List<DanmakuItem> items = doSearch(source.url, queryInfo, true);
+                                attachApiSourceName(items, source.name);
+                                return new AutoSourceSearchResult(source.name, items);
+                            }
+                        });
+                submittedTasks.add(future);
+                pendingTasks++;
+            }
+
+            SearchResult bestFallback = null;
+            long endTime = System.currentTimeMillis() + AUTO_SEARCH_TIMEOUT_MS;
+            while (pendingTasks > 0) {
+                long timeLeft = endTime - System.currentTimeMillis();
+                if (timeLeft <= 0) break;
+
+                java.util.concurrent.Future<AutoSourceSearchResult> future =
+                        completionService.poll(timeLeft, TimeUnit.MILLISECONDS);
+                if (future == null) break;
+                pendingTasks--;
+
+                AutoSourceSearchResult sourceResult;
+                try {
+                    sourceResult = future.get();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                } catch (Exception e) {
+                    DanmakuSpider.log("自动搜索源异常: " + e.getMessage());
+                    continue;
+                }
+
+                List<DanmakuItem> items = sourceResult != null ? sourceResult.items : null;
+                if (items == null || items.isEmpty()) continue;
+
+                filterByKeyword(items, searchKeyword);
+                if (items.isEmpty()) continue;
+
+                finishedResults.addAll(items);
+                String sourceName = sourceResult.apiSourceName;
+                String scopeName = TextUtils.isEmpty(sourceName) ? "自动搜索" : "自动搜索-" + sourceName;
+                SearchResult currentResult = pickBestAutoMatch(searchKeyword, queryInfo, items, scopeName);
+                if (!currentResult.found) continue;
+
+                if (currentResult.similarity >= AUTO_SOURCE_CONFIDENCE_THRESHOLD) {
+                    DanmakuSpider.log("✅ 自动匹配命中可靠结果，取消其他API源 (相似度: " + currentResult.similarity + ")");
+                    updateLastDanmakuItems(finishedResults);
+                    return currentResult;
+                }
+
+                if (bestFallback == null || currentResult.similarity > bestFallback.similarity) {
+                    bestFallback = currentResult;
+                }
+            }
+
+            updateLastDanmakuItems(finishedResults);
+            if (bestFallback != null) {
+                DanmakuSpider.log("🏁 自动搜索未等到可靠命中，返回当前最佳候选 (相似度: " + bestFallback.similarity + ")");
+                return bestFallback;
+            }
+        } catch (Exception e) {
+            DanmakuSpider.log("自动搜索异常: " + e.getMessage());
+        } finally {
+            for (java.util.concurrent.Future<AutoSourceSearchResult> future : submittedTasks) {
+                if (future != null && !future.isDone()) future.cancel(true);
+            }
+            if (executor != null) executor.shutdownNow();
         }
 
         DanmakuSpider.log("自动搜索未找到任何结果 for keyword: " + searchKeyword);
@@ -672,13 +738,13 @@ public class LeoDanmakuService {
             new Thread(new Runnable() {
                 @Override
                 public void run() {
-                    pushDanmakuInThread(danmakuItem, activity);
+                    pushDanmakuInThread(danmakuItem, activity, !isAuto);
                 }
             }).start();
         } else {
             // 已经在子线程，直接执行
             DanmakuSpider.log("已经在子线程，直接执行弹幕推送");
-            pushDanmakuInThread(danmakuItem, activity);
+            pushDanmakuInThread(danmakuItem, activity, !isAuto);
         }
     }
 
@@ -696,7 +762,7 @@ public class LeoDanmakuService {
     }
 
     // 单独的网络推送方法，确保在子线程中执行
-    private static void pushDanmakuInThread(DanmakuItem danmakuItem, Activity activity) {
+    private static void pushDanmakuInThread(DanmakuItem danmakuItem, Activity activity, boolean validateBeforePush) {
         try {
             if (TextUtils.isEmpty(danmakuItem.getDanmakuUrl())) {
                 DanmakuSpider.log("推送弹幕URL为空");
@@ -707,47 +773,51 @@ public class LeoDanmakuService {
 
             // 步骤1: 先获取弹幕数据，验证是否有效
             String danmakuData = null;
-            int danmakuCount = 0;
-            final int maxRetries = 3;
+            int danmakuCount = -1;
+            final int maxRetries = 2;
 
-            for (int attempt = 0; attempt < maxRetries; attempt++) {
-                try {
-                    danmakuData = NetworkUtils.robustHttpGet(danmakuItem.getDanmakuUrl());
-                    DanmakuSpider.log("获取弹幕数据 (尝试 " + (attempt + 1) + "/" + maxRetries + ") - URL: " + danmakuItem.getDanmakuUrl());
+            if (validateBeforePush) {
+                for (int attempt = 0; attempt < maxRetries; attempt++) {
+                    try {
+                        danmakuData = NetworkUtils.robustHttpGet(danmakuItem.getDanmakuUrl(), 15000, 1, 0);
+                        DanmakuSpider.log("获取弹幕数据 (尝试 " + (attempt + 1) + "/" + maxRetries + ") - URL: " + danmakuItem.getDanmakuUrl());
 
-                    // 直接尝试解析，如果成功（返回-1代表解析异常，0代表无内容，大于0代表成功）
-                    danmakuCount = countDanmakuItems(danmakuData);
-                    if (danmakuCount > 0) {
-                        DanmakuSpider.log("✅ 获取到有效弹幕数据，总数: " + danmakuCount + " 条");
-                        break; // 成功获取，跳出重试
-                    } else if (danmakuCount == 0) {
-                        DanmakuSpider.log("⚠️ 弹幕数据为空或无内容，尝试次数: " + (attempt + 1) + "/" + maxRetries);
-                    } else {
-                        DanmakuSpider.log("⚠️ 弹幕数据格式错误或解析失败，尝试次数: " + (attempt + 1) + "/" + maxRetries);
-                    }
-
-                    // 重试等待
-                    if (attempt < maxRetries - 1) {
-                        try {
-                            Thread.sleep(1000);
-                        } catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt();
+                        // 直接尝试解析，如果成功（返回-1代表解析异常，0代表无内容，大于0代表成功）
+                        danmakuCount = countDanmakuItems(danmakuData);
+                        if (danmakuCount > 0) {
+                            DanmakuSpider.log("✅ 获取到有效弹幕数据，总数: " + danmakuCount + " 条");
+                            break; // 成功获取，跳出重试
+                        } else if (danmakuCount == 0) {
+                            DanmakuSpider.log("⚠️ 弹幕数据为空或无内容，尝试次数: " + (attempt + 1) + "/" + maxRetries);
+                        } else {
+                            DanmakuSpider.log("⚠️ 弹幕数据格式错误或解析失败，尝试次数: " + (attempt + 1) + "/" + maxRetries);
                         }
-                    }
-                } catch (Exception e) {
-                    DanmakuSpider.log("获取弹幕数据异常 (尝试 " + (attempt + 1) + "/" + maxRetries + "): " + e.getMessage());
-                    if (attempt < maxRetries - 1) {
-                        try {
-                            Thread.sleep(1000);
-                        } catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt();
+
+                        // 重试等待
+                        if (attempt < maxRetries - 1) {
+                            try {
+                                Thread.sleep(500);
+                            } catch (InterruptedException ie) {
+                                Thread.currentThread().interrupt();
+                            }
+                        }
+                    } catch (Exception e) {
+                        DanmakuSpider.log("获取弹幕数据异常 (尝试 " + (attempt + 1) + "/" + maxRetries + "): " + e.getMessage());
+                        if (attempt < maxRetries - 1) {
+                            try {
+                                Thread.sleep(500);
+                            } catch (InterruptedException ie) {
+                                Thread.currentThread().interrupt();
+                            }
                         }
                     }
                 }
+            } else {
+                DanmakuSpider.log("自动推送跳过弹幕预验证，直接刷新播放器");
             }
 
             // 如果数据验证失败，直接返回
-            if (danmakuCount <= 0) {
+            if (validateBeforePush && danmakuCount <= 0) {
                 DanmakuSpider.log("❌ 无法获取有效的弹幕数据（或弹幕为空），取消推送");
                 if (activity != null && !activity.isFinishing()) {
                     activity.runOnUiThread(new Runnable() {
@@ -774,7 +844,7 @@ public class LeoDanmakuService {
 
             String pushResp = "";
             for (int i = 0; i < 3; i++) {
-                pushResp = NetworkUtils.robustHttpGet(pushUrl);
+                pushResp = NetworkUtils.robustHttpGet(pushUrl, 5000, 1, 0);
                 DanmakuSpider.log("推送尝试 " + (i + 1) + "/3: " + (!TextUtils.isEmpty(pushResp) ? "成功" : "失败"));
                 if (!TextUtils.isEmpty(pushResp) && pushResp.toLowerCase().contains("ok")) {
                     DanmakuSpider.log("✅ 推送成功");
@@ -798,10 +868,14 @@ public class LeoDanmakuService {
                     @Override
                     public void run() {
                         if (!TextUtils.isEmpty(finalPushResp) && finalPushResp.toLowerCase().contains("ok")) {
-                            String message = String.format("弹幕已推送: %s - %s (共%d条)",
-                                    danmakuItem.getTitle(),
-                                    danmakuItem.getEpTitle(),
-                                    finalDanmakuCount);
+                            String message = finalDanmakuCount > 0 ?
+                                    String.format("弹幕已推送: %s - %s (共%d条)",
+                                            danmakuItem.getTitle(),
+                                            danmakuItem.getEpTitle(),
+                                            finalDanmakuCount) :
+                                    String.format("弹幕已推送: %s - %s",
+                                            danmakuItem.getTitle(),
+                                            danmakuItem.getEpTitle());
                             Utils.safeShowToast(activity, message);
                             DanmakuSpider.log(message);
                         } else {

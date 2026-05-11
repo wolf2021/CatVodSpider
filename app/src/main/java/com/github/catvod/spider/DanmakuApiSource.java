@@ -7,33 +7,30 @@ public class DanmakuApiSource {
     public String url;
     public String name;
     public boolean enabled;
-    public int priority;
     public long lastLatencyMs;
     public long lastSuccessTimeMs;
     public long lastTestTimeMs;
     public String lastError;
 
     public DanmakuApiSource() {
-        this("", true, 0);
+        this("", true);
     }
 
-    public DanmakuApiSource(String url, boolean enabled, int priority) {
+    public DanmakuApiSource(String url, boolean enabled) {
         ParsedEntry entry = parseEntry(url);
         this.url = entry.url;
         this.name = entry.name;
         this.enabled = enabled;
-        this.priority = priority;
         this.lastLatencyMs = -1;
         this.lastSuccessTimeMs = 0;
         this.lastTestTimeMs = 0;
         this.lastError = "";
     }
 
-    public DanmakuApiSource(String url, String name, boolean enabled, int priority) {
+    public DanmakuApiSource(String url, String name, boolean enabled) {
         this.url = normalizeUrl(url);
         this.name = normalizeName(name);
         this.enabled = enabled;
-        this.priority = priority;
         this.lastLatencyMs = -1;
         this.lastSuccessTimeMs = 0;
         this.lastTestTimeMs = 0;

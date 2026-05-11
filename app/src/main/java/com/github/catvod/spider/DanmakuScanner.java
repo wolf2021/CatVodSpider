@@ -40,8 +40,8 @@ public class DanmakuScanner {
     private static long videoPlayStartTime = 0;
     private static final long MIN_PLAY_DURATION_BEFORE_PUSH = 0; // 至少播放0秒再推送
     private static final long YSC_MIN_PLAY_DURATION_BEFORE_PUSH = 3000; // 至少播放0秒再推送
-    private static final long FORCE_PUSH_TIMEOUT = 10000; // 10秒后强制推送
-    private static final long MAX_WAIT_FOR_PLAYBACK = 15000; // 最多等待15秒
+    private static final long PUSH_DEDUP_INTERVAL = 10000; // 10秒内不重复安排同一弹幕
+    private static final long MAX_WAIT_FOR_PLAYBACK = 60000; // 最多等待60秒开始播放
 
     // View ID 生成器（兼容低版本Android）
     private static int nextViewId = 10000;
@@ -52,7 +52,6 @@ public class DanmakuScanner {
         Activity activity;
         String title;
         long scheduleTime;
-        boolean isForcedPush = false; // 标记是否为强制推送
 
         PendingPush(DanmakuItem danmakuItem, Activity activity, String title, long scheduleTime) {
             this.danmakuItem = danmakuItem;
@@ -143,24 +142,22 @@ public class DanmakuScanner {
                                     return;
                                 }
 
+                                boolean wasPlaying = isVideoPlaying;
                                 isVideoPlaying = media.isPlaying();
 
-                                if (isVideoPlaying) {
-                                    // 获取媒体信息
-                                    lastEpisodeInfo = getEpisodeInfo(media, act);
+                                // 获取媒体信息。即使尚未开始播放，也可以先发起自动匹配。
+                                lastEpisodeInfo = getEpisodeInfo(media, act);
 
-                                    // 视频开始播放
+                                if (isVideoPlaying && !wasPlaying) {
                                     videoPlayStartTime = System.currentTimeMillis();
 //                                    DanmakuSpider.log("▶️ 检测到视频开始播放");
-                                } else {
-                                    // 视频停止播放
+                                } else if (!isVideoPlaying && wasPlaying) {
                                     DanmakuSpider.log("⏸️ 检测到视频停止播放");
 
                                     // 清空缓存和队列
                                     pendingPushes.clear();
                                     lastPushTime.clear();
-
-                                    return;
+                                    videoPlayStartTime = 0;
                                 }
 
                                 DanmakuConfig config = DanmakuConfigManager.getConfig(act);
@@ -277,7 +274,7 @@ public class DanmakuScanner {
                     DanmakuSpider.log("❌ 播放检查定时器异常: " + e.getMessage());
                 }
             }
-        }, 2000, 2000); // 2秒后开始，每2秒检查一次
+        }, 1000, 1000); // 1秒后开始，每1秒检查一次
     }
 
     // 检查播放状态
@@ -388,17 +385,6 @@ public class DanmakuScanner {
                 continue;
             }
 
-            // 检查是否达到强制推送时间（10秒）
-            boolean shouldForcePush = waitTime >= FORCE_PUSH_TIMEOUT && !push.isForcedPush;
-
-            if (shouldForcePush) {
-                DanmakuSpider.log("🚨 等待" + waitTime + "ms未检测到播放状态，强制推送: " + key);
-                push.isForcedPush = true;
-                executePendingPush(push, true);
-                pendingPushes.remove(key);
-                continue;
-            }
-
             Media media = getMedia();
             if (media == null) {
                 DanmakuSpider.log("❌ 无法获取当前播放媒体信息，取消推送: " + key);
@@ -407,12 +393,16 @@ public class DanmakuScanner {
             }
             // 检查视频是否在播放
             if (media.isPlaying()) {
+                if (videoPlayStartTime <= 0) {
+                    videoPlayStartTime = currentTime;
+                    DanmakuSpider.log("▶️ 检测到视频开始播放");
+                }
                 if (media.getState() != null) {
                     // 检查是否播放了足够长时间
                     long playDuration = currentTime - videoPlayStartTime;
                     if (playDuration >= MIN_PLAY_DURATION_BEFORE_PUSH) {
                         DanmakuSpider.log("✅ 视频已播放" + playDuration + "ms，执行推送: " + key);
-                        executePendingPush(push, false);
+                        executePendingPush(push);
                         pendingPushes.remove(key);
                     } else {
                         DanmakuSpider.log("⏳ 视频播放中(" + playDuration + "ms)，等待达到" + MIN_PLAY_DURATION_BEFORE_PUSH + "ms");
@@ -422,26 +412,26 @@ public class DanmakuScanner {
                     long playDuration = currentTime - videoPlayStartTime;
                     if (playDuration >= YSC_MIN_PLAY_DURATION_BEFORE_PUSH) {
                         DanmakuSpider.log("✅ 视频已播放" + playDuration + "ms，执行推送: " + key);
-                        executePendingPush(push, false);
+                        executePendingPush(push);
                         pendingPushes.remove(key);
                     } else {
                         DanmakuSpider.log("⏳ 视频播放中(" + playDuration + "ms)，等待达到" + YSC_MIN_PLAY_DURATION_BEFORE_PUSH + "ms");
                     }
                 }
             } else {
-                DanmakuSpider.log("⏸️ 视频未播放，已等待" + waitTime + "ms，还剩" + (FORCE_PUSH_TIMEOUT - waitTime) + "ms将强制推送");
+                DanmakuSpider.log("⏸️ 视频未播放，已等待" + waitTime + "ms，继续等待开始播放");
             }
         }
     }
 
     // 执行待推送任务
-    private static void executePendingPush(PendingPush push, boolean isForced) {
+    private static void executePendingPush(PendingPush push) {
         if (push.activity == null || push.activity.isFinishing()) {
             DanmakuSpider.log("⚠️ Activity无效，取消推送");
             return;
         }
 
-        DanmakuSpider.log("🚀 开始执行" + (isForced ? "强制" : "") + "推送: " + push.danmakuItem.getDanmakuUrl());
+        DanmakuSpider.log("🚀 开始执行推送: " + push.danmakuItem.getDanmakuUrl());
 
         new Thread(new Runnable() {
             @Override
@@ -515,6 +505,7 @@ public class DanmakuScanner {
 
         if (!isSameVideo) {
             // 不同的视频
+            pendingPushes.clear();
             DanmakuManager.currentVideoSignature = newSignature;
             DanmakuManager.lastVideoDetectedTime = System.currentTimeMillis();
 
@@ -858,7 +849,9 @@ public class DanmakuScanner {
         // 合并多个空格
         processed = processed.replaceAll("\\s+", " ").trim();
 
-        DanmakuSpider.log("预处理标题: " + title + " -> " + processed);
+        if (!title.equals(processed)) {
+            DanmakuSpider.log("预处理标题: " + title + " -> " + processed);
+        }
 
         return processed.isEmpty() ? title : processed;
     }
@@ -1231,13 +1224,65 @@ public class DanmakuScanner {
 
     // 安排延迟推送
     private static void scheduleDelayedPush(DanmakuItem item, Activity activity, String title, String pushKey) {
+        if (item == null || TextUtils.isEmpty(item.getDanmakuUrl())) {
+            DanmakuSpider.log("⚠️ 待推送弹幕为空，跳过延迟推送");
+            return;
+        }
+        Long lastPush = lastPushTime.get(item.getDanmakuUrl());
+        if (lastPush != null && System.currentTimeMillis() - lastPush < PUSH_DEDUP_INTERVAL) {
+            DanmakuSpider.log("⚠️ 最近已推送过该弹幕，跳过延迟推送: " + item.getDanmakuUrl());
+            return;
+        }
+        PendingPush pendingPush = new PendingPush(item, activity, title, System.currentTimeMillis());
+        if (executeIfReadyToPush(pendingPush, pushKey)) {
+            return;
+        }
         DanmakuSpider.log("⏰ 安排延迟推送: " + pushKey);
         DanmakuSpider.log("   item: " + item.toString());
-        DanmakuSpider.log("   等待视频播放后再推送（最多等待" + FORCE_PUSH_TIMEOUT/1000 + "秒）...");
+        DanmakuSpider.log("   等待视频播放后再推送（最多等待" + MAX_WAIT_FOR_PLAYBACK/1000 + "秒）...");
 
         // 添加到待推送队列
-        PendingPush pendingPush = new PendingPush(item, activity, title, System.currentTimeMillis());
         pendingPushes.put(pushKey, pendingPush);
+    }
+
+    private static boolean executeIfReadyToPush(PendingPush push, String pushKey) {
+        try {
+            Media media = getMedia();
+            if (media == null || !media.isPlaying()) {
+                return false;
+            }
+
+            long currentTime = System.currentTimeMillis();
+            if (videoPlayStartTime <= 0) {
+                videoPlayStartTime = currentTime;
+                DanmakuSpider.log("▶️ 检测到视频开始播放");
+            }
+
+            long requiredDuration = media.getState() != null ? MIN_PLAY_DURATION_BEFORE_PUSH : YSC_MIN_PLAY_DURATION_BEFORE_PUSH;
+            long playDuration = currentTime - videoPlayStartTime;
+            if (playDuration < requiredDuration) {
+                DanmakuSpider.log("⏳ 视频播放中(" + playDuration + "ms)，等待达到" + requiredDuration + "ms");
+                return false;
+            }
+
+            DanmakuSpider.log("✅ 视频已播放" + playDuration + "ms，立即执行推送: " + pushKey);
+            executePendingPush(push);
+            return true;
+        } catch (Exception e) {
+            DanmakuSpider.log("⚠️ 即时推送检查异常: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private static void scheduleAutoPush(DanmakuItem item, Activity activity, EpisodeInfo episodeInfo) {
+        String signature = episodeInfo != null ? generateSignature(episodeInfo) : "";
+        if (!isSameVideo(DanmakuManager.currentVideoSignature, signature)) {
+            DanmakuSpider.log("⚠️ 自动匹配结果已过期，跳过延迟推送");
+            return;
+        }
+        String url = item != null ? item.getDanmakuUrl() : "";
+        String pushKey = (TextUtils.isEmpty(signature) ? "unknown" : signature) + "#" + url;
+        scheduleDelayedPush(item, activity, episodeInfo != null ? episodeInfo.getFileName() : "", pushKey);
     }
 
     // === 修改后的按钮注入逻辑 ===
@@ -1732,8 +1777,8 @@ public class DanmakuScanner {
 
                 if (currentResult.found) {
                     if (currentResult.similarity == 1.0) {
-                        DanmakuSpider.log("✅ 找到完全匹配结果，立即推送并停止搜索");
-                        LeoDanmakuService.pushDanmakuDirect(currentResult.item, activity, true);
+                        DanmakuSpider.log("✅ 找到完全匹配结果，等待播放后推送");
+                        scheduleAutoPush(currentResult.item, activity, episodeInfo);
                         return; // 找到完全匹配结果，结束方法
                     }
 
@@ -1744,8 +1789,8 @@ public class DanmakuScanner {
             }
 
             if (bestResult != null && bestResult.similarity >= 0.85) {
-                DanmakuSpider.log("🏁 迭代搜索结束，未找到完全匹配结果。推送最佳匹配项 (相似度: " + bestResult.similarity + ")");
-                LeoDanmakuService.pushDanmakuDirect(bestResult.item, activity, true);
+                DanmakuSpider.log("🏁 迭代搜索结束，未找到完全匹配结果。等待播放后推送最佳匹配项 (相似度: " + bestResult.similarity + ")");
+                scheduleAutoPush(bestResult.item, activity, episodeInfo);
             } else {
                 // 输出分析对比信息
                 String inputName = episodeInfo.getEpisodeNames().get(0);

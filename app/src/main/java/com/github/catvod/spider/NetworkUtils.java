@@ -20,10 +20,16 @@ public class NetworkUtils {
     }
 
     public static String robustHttpGet(String urlStr) {
-        for (int retry = 0; retry < 2; retry++) {
+        return robustHttpGet(urlStr, 30000, 2, 500);
+    }
+
+    public static String robustHttpGet(String urlStr, int timeoutMs, int maxRetries, int retryDelayMs) {
+        int attempts = Math.max(1, maxRetries);
+        for (int retry = 0; retry < attempts; retry++) {
+            HttpURLConnection conn = null;
             try {
                 URL url = new URL(urlStr);
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn = (HttpURLConnection) url.openConnection();
 
                 // 处理HTTPS
                 if (conn instanceof HttpsURLConnection) {
@@ -34,8 +40,8 @@ public class NetworkUtils {
                 }
 
                 conn.setRequestMethod("GET");
-                conn.setConnectTimeout(30000);
-                conn.setReadTimeout(30000);
+                conn.setConnectTimeout(timeoutMs);
+                conn.setReadTimeout(timeoutMs);
                 conn.setRequestProperty("User-Agent", "Mozilla/5.0");
                 conn.setInstanceFollowRedirects(true);
                 // 添加这些请求头，模拟浏览器
@@ -65,11 +71,13 @@ public class NetworkUtils {
             } catch (Exception e) {
                 DanmakuSpider.log("网络请求失败(" + retry + "): " + urlStr + " - " +
                         (e.getMessage() != null ? e.getMessage() : e.getClass().getName()));
-                if (retry < 1) {
+                if (retry < attempts - 1) {
                     try {
-                        Thread.sleep(500);
+                        Thread.sleep(retryDelayMs);
                     } catch (InterruptedException ie) {}
                 }
+            } finally {
+                if (conn != null) conn.disconnect();
             }
         }
         return "";

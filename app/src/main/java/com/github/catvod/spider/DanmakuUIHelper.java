@@ -516,8 +516,8 @@ public class DanmakuUIHelper {
             listLayout.addView(itemLayout, itemParams);
 
             TextView urlView = new TextView(activity);
-            String sourceLabel = source.getDisplayName("源" + (source.priority + 1));
-            String sourceTitle = (source.priority + 1) + ". " + sourceLabel;
+            String sourceLabel = source.getDisplayName("源" + (i + 1));
+            String sourceTitle = (i + 1) + ". " + sourceLabel;
             if (!TextUtils.isEmpty(source.name)) {
                 sourceTitle += "\n" + sourceUrl;
             } else {
@@ -544,15 +544,11 @@ public class DanmakuUIHelper {
                     source.enabled ? ACCENT_COLOR : TERTIARY_COLOR);
             Button aliasBtn = createStyledButtonWithBorder(activity, "别名", PRIMARY_COLOR);
             Button testBtn = createStyledButton(activity, "测试", PRIMARY_COLOR);
-            Button upBtn = createStyledButtonWithBorder(activity, "上移", PRIMARY_COLOR);
-            Button downBtn = createStyledButtonWithBorder(activity, "下移", PRIMARY_COLOR);
             Button deleteBtn = createStyledButtonWithBorder(activity, "删除", ACCENT_COLOR);
 
             actionLayout.addView(toggleBtn, createSourceButtonParams(activity));
             actionLayout.addView(aliasBtn, createSourceButtonParams(activity));
             actionLayout.addView(testBtn, createSourceButtonParams(activity));
-            actionLayout.addView(upBtn, createSourceButtonParams(activity));
-            actionLayout.addView(downBtn, createSourceButtonParams(activity));
             actionLayout.addView(deleteBtn, createSourceButtonParams(activity));
             itemLayout.addView(actionLayout);
 
@@ -568,21 +564,6 @@ public class DanmakuUIHelper {
 
             testBtn.setOnClickListener(v -> testApiSource(activity, sourceUrl, testBtn, refresh));
             aliasBtn.setOnClickListener(v -> showApiSourceAliasDialog(activity, sourceUrl, refresh));
-            upBtn.setEnabled(i > 0);
-            upBtn.setOnClickListener(v -> {
-                DanmakuConfig latest = DanmakuConfigManager.getConfig(activity);
-                latest.moveApiSource(sourceUrl, -1);
-                DanmakuConfigManager.saveConfig(activity, latest);
-                refresh.run();
-            });
-
-            downBtn.setEnabled(i < sources.size() - 1);
-            downBtn.setOnClickListener(v -> {
-                DanmakuConfig latest = DanmakuConfigManager.getConfig(activity);
-                latest.moveApiSource(sourceUrl, 1);
-                DanmakuConfigManager.saveConfig(activity, latest);
-                refresh.run();
-            });
 
             deleteBtn.setOnClickListener(v -> {
                 DanmakuConfig latest = DanmakuConfigManager.getConfig(activity);
@@ -718,7 +699,7 @@ public class DanmakuUIHelper {
         if (enabledSources.isEmpty()) return "已配置 " + sources.size() + " 个API源，当前全部停用";
         DanmakuApiSource first = enabledSources.get(0);
         String firstName = first.getDisplayName(shortenUrl(first.url));
-        return "已启用 " + enabledSources.size() + "/" + sources.size() + "，首选：" + firstName;
+        return "已启用 " + enabledSources.size() + "/" + sources.size() + "，例如：" + firstName;
     }
 
     private static String formatApiSourceStatus(DanmakuApiSource source) {

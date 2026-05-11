@@ -5,8 +5,6 @@ import org.json.JSONArray;
 
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
-import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -20,7 +18,7 @@ public class DanmakuConfig {
      */
     public Set<String> apiUrls;
     /**
-     * 可维护的弹幕API源列表，保留启停、优先级和最近测试状态。
+     * 可维护的弹幕API源列表，保留启停、别名和最近测试状态。
      */
     public List<DanmakuApiSource> apiSources;
     /**
@@ -141,12 +139,11 @@ public class DanmakuConfig {
             if (!isValidApiUrl(url) || apiUrls.contains(url)) continue;
 
             DanmakuApiSource oldSource = findSource(oldSources, url);
-            DanmakuApiSource source = oldSource != null ? oldSource : new DanmakuApiSource(url, true, apiSources.size());
+            DanmakuApiSource source = oldSource != null ? oldSource : new DanmakuApiSource(url, true);
             source.url = url;
             if (entry.hasName || source.name == null) {
                 source.name = entry.name;
             }
-            source.priority = apiSources.size();
             apiSources.add(source);
             apiUrls.add(url);
         }
@@ -202,22 +199,6 @@ public class DanmakuConfig {
         normalize();
     }
 
-    public void moveApiSource(String rawUrl, int direction) {
-        normalize();
-        String url = DanmakuApiSource.parseEntry(rawUrl).url;
-        for (int i = 0; i < apiSources.size(); i++) {
-            DanmakuApiSource source = apiSources.get(i);
-            if (source != null && url.equals(source.url)) {
-                int target = i + direction;
-                if (target >= 0 && target < apiSources.size()) {
-                    Collections.swap(apiSources, i, target);
-                    rebuildApiUrlIndex();
-                }
-                return;
-            }
-        }
-    }
-
     public void recordApiSourceResult(String rawUrl, boolean success, long latencyMs, String error) {
         DanmakuApiSource source = findApiSource(rawUrl);
         if (source == null) return;
@@ -255,13 +236,6 @@ public class DanmakuConfig {
             seen.add(source.url);
         }
 
-        Collections.sort(validSources, new Comparator<DanmakuApiSource>() {
-            @Override
-            public int compare(DanmakuApiSource left, DanmakuApiSource right) {
-                return left.priority - right.priority;
-            }
-        });
-
         apiSources = validSources;
         rebuildApiUrlIndex();
     }
@@ -270,7 +244,6 @@ public class DanmakuConfig {
         apiUrls.clear();
         for (int i = 0; i < apiSources.size(); i++) {
             DanmakuApiSource source = apiSources.get(i);
-            source.priority = i;
             apiUrls.add(source.url);
         }
     }
