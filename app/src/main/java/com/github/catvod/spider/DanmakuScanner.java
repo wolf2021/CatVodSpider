@@ -34,6 +34,7 @@ public class DanmakuScanner {
     public static String currentEpisodeNum = "";
     private static long lastEpisodeChangeTime = 0;
     private static final long MIN_EPISODE_CHANGE_INTERVAL = 1000;
+    private static String lastEpisodeExtractDebugKey = "";
 
     // 视频播放状态
     private static boolean isVideoPlaying = false;
@@ -189,7 +190,8 @@ public class DanmakuScanner {
     private static EpisodeInfo getEpisodeInfo(Media media, Activity act) {
         // 提取剧集信息
         String seriesName = extractSeriesName(media.getTitle());
-        String episodeNum = extractEpisodeNum(media.getArtist().replace("正在播放：", ""));
+        String fileName = normalizePlaybackName(media.getArtist());
+        String episodeNum = extractEpisodeNumFromMedia(media, fileName);
         String year = extractYear(media.getArtist());
         if (TextUtils.isEmpty(year)) {
             year = extractYear2(media.getTitle());
@@ -228,10 +230,114 @@ public class DanmakuScanner {
         episodeInfo.setEpisodeYear(year);
         episodeInfo.setEpisodeSeasonNum(seasonNum);
         episodeInfo.setSeriesName(seriesName);
-        episodeInfo.setFileName(media.getArtist().replace("正在播放：", ""));
+        episodeInfo.setFileName(fileName);
         episodeInfo.setEpisodeUrl(media.getUrl());
 
         return episodeInfo;
+    }
+
+    private static String normalizePlaybackName(String text) {
+        if (TextUtils.isEmpty(text)) return "";
+        return text.replaceFirst("^\\s*正在播放\\s*[:：]?\\s*", "").trim();
+    }
+
+    private static String extractEpisodeNumFromMedia(Media media, String fileName) {
+        String title = media != null ? media.getTitle() : "";
+        String urlFileName = extractFileNameFromUrl(media != null ? media.getUrl() : "");
+
+        String episodeNum = extractEpisodeNumQuiet(fileName);
+        if (!TextUtils.isEmpty(episodeNum)) {
+            logEpisodeExtractDebug(media, fileName, urlFileName, "artist/fileName", episodeNum);
+            return episodeNum;
+        }
+
+        if (!TextUtils.isEmpty(title) && !title.equals(fileName)) {
+            episodeNum = extractEpisodeNumQuiet(title);
+            if (!TextUtils.isEmpty(episodeNum)) {
+                logEpisodeExtractDebug(media, fileName, urlFileName, "title", episodeNum);
+                return episodeNum;
+            }
+        }
+
+        if (shouldUseUrlFileNameForEpisode(urlFileName)
+                && !urlFileName.equals(fileName)
+                && !urlFileName.equals(title)) {
+            episodeNum = extractEpisodeNumQuiet(urlFileName);
+            if (!TextUtils.isEmpty(episodeNum)) {
+                logEpisodeExtractDebug(media, fileName, urlFileName, "urlFileName", episodeNum);
+                return episodeNum;
+            }
+        }
+
+        logEpisodeExtractDebug(media, fileName, urlFileName, "none", "");
+        return "";
+    }
+
+    private static String extractFileNameFromUrl(String url) {
+        if (TextUtils.isEmpty(url)) return "";
+        try {
+            String clean = url;
+            int urlParamIndex = clean.indexOf("url=");
+            if (urlParamIndex >= 0) {
+                String nested = clean.substring(urlParamIndex + 4);
+                int nestedEnd = nested.indexOf('&');
+                if (nestedEnd >= 0) nested = nested.substring(0, nestedEnd);
+                clean = java.net.URLDecoder.decode(nested, "UTF-8");
+            }
+            int queryIndex = clean.indexOf('?');
+            if (queryIndex >= 0) clean = clean.substring(0, queryIndex);
+            int hashIndex = clean.indexOf('#');
+            if (hashIndex >= 0) clean = clean.substring(0, hashIndex);
+            int slashIndex = clean.lastIndexOf('/');
+            if (slashIndex >= 0 && slashIndex < clean.length() - 1) {
+                clean = clean.substring(slashIndex + 1);
+            }
+            return java.net.URLDecoder.decode(clean, "UTF-8").trim();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private static boolean shouldUseUrlFileNameForEpisode(String fileName) {
+        if (TextUtils.isEmpty(fileName)) return false;
+        String baseName = stripMediaExtension(fileName);
+        String lower = baseName.toLowerCase();
+        if (lower.equals("m3u8") || lower.equals("index") || lower.equals("playlist")) return false;
+        if (lower.matches("[0-9a-f]{12,}")) return false;
+        if (lower.matches("[0-9]{1,3}")) return true;
+        return lower.matches(".*(第\\s*[0-9零一二三四五六七八九十百千万]+\\s*[集话章节回期]|s\\d{1,2}[-._\\s]*e\\d{1,3}|ep[-._\\s]*\\d{1,3}|[._\\-\\s]\\d{1,3}([._\\-\\s]|$)).*");
+    }
+
+    private static String stripMediaExtension(String fileName) {
+        if (TextUtils.isEmpty(fileName)) return "";
+        return fileName.replaceFirst("(?i)\\.(m3u8|mp4|mkv|ts|flv|avi|mov|wmv|webm)$", "");
+    }
+
+    private static void logEpisodeExtractDebug(Media media, String fileName, String urlFileName, String source, String episodeNum) {
+        String title = media != null ? media.getTitle() : "";
+        String artist = media != null ? media.getArtist() : "";
+        String url = media != null ? media.getUrl() : "";
+        String debugKey = title + "|" + artist + "|" + url + "|" + fileName + "|" + urlFileName + "|" + source + "|" + episodeNum;
+        if (debugKey.equals(lastEpisodeExtractDebugKey)) return;
+        lastEpisodeExtractDebugKey = debugKey;
+
+        DanmakuSpider.log("🧾 媒体信息: title=" + cleanLogText(title)
+                + ", artist=" + cleanLogText(artist)
+                + ", fileName=" + cleanLogText(fileName)
+                + ", urlFileName=" + cleanLogText(urlFileName));
+        DanmakuSpider.log("🔢 集数提取: " + (TextUtils.isEmpty(episodeNum) ? "未提取" : episodeNum)
+                + "，来源: " + source
+                + "，url=" + shortenForLog(cleanLogText(url), 180));
+    }
+
+    private static String cleanLogText(String text) {
+        if (TextUtils.isEmpty(text)) return "";
+        return text.replaceAll("\\s+", " ").trim();
+    }
+
+    private static String shortenForLog(String text, int maxLen) {
+        if (TextUtils.isEmpty(text) || text.length() <= maxLen) return text;
+        return text.substring(0, maxLen) + "...";
     }
 
     @Nullable
@@ -634,6 +740,14 @@ public class DanmakuScanner {
 
     // 提取集数
     public static String extractEpisodeNum(String title) {
+        return extractEpisodeNum(title, true);
+    }
+
+    private static String extractEpisodeNumQuiet(String title) {
+        return extractEpisodeNum(title, false);
+    }
+
+    private static String extractEpisodeNum(String title, boolean logFailure) {
         if (TextUtils.isEmpty(title)) {
             return "";
         }
@@ -819,7 +933,9 @@ public class DanmakuScanner {
             return possibleEpisodes.get(0);
         }
 
-        DanmakuSpider.log("未能提取到集数，标题: " + title);
+        if (logFailure) {
+            DanmakuSpider.log("未能提取到集数，标题: " + title);
+        }
 
         return "";
     }
@@ -1150,10 +1266,15 @@ public class DanmakuScanner {
         // 检查是否有有效的剧集名
         if (lastEpisodeInfo.getEpisodeNames() == null || lastEpisodeInfo.getEpisodeNames().isEmpty()) {
             DanmakuSpider.log("⚠️ 未检测到剧集名，不进行换集检测");
+            DanmakuManager.currentVideoSignature = "";
             return;
         }
         if (TextUtils.isEmpty(lastEpisodeInfo.getEpisodeNum())) {
-            DanmakuSpider.log("⚠️ 未检测到集数，不进行换集检测");
+            DanmakuSpider.log("⚠️ 未检测到集数，按当前视频触发自动搜索");
+            currentSeriesName = lastEpisodeInfo.getSeriesName();
+            currentEpisodeNum = "";
+            lastEpisodeChangeTime = currentTime;
+            startAutoSearch(lastEpisodeInfo, activity);
             return;
         }
 
