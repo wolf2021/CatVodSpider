@@ -20,9 +20,12 @@ public class LeoDanmakuService {
 
     // 线程池
     private static final ExecutorService searchExecutor = Executors.newFixedThreadPool(8);
+    private static final ExecutorService seriesPrecacheExecutor = Executors.newSingleThreadExecutor();
     // 优化防重复推送：针对每个URL记录推送时间
     private static final Map<String, Long> lastPushTimes = new ConcurrentHashMap<>();
+    private static final Map<String, Long> seriesPrecacheTimes = new ConcurrentHashMap<>();
     private static final long PUSH_MIN_INTERVAL = 3000; // 3秒内不重复推送
+    private static final long SERIES_PRECACHE_INTERVAL = 5 * 60 * 1000;
     private static final int AUTO_SEARCH_TIMEOUT_MS = 30000;
     private static final int MANUAL_SEARCH_TIMEOUT_MS = 30000;
     private static final int AUTO_SEARCH_HTTP_TIMEOUT_MS = 30000;
@@ -67,10 +70,12 @@ public class LeoDanmakuService {
 
     private static class AutoSourceSearchResult {
         String apiSourceName;
+        String apiBase;
         List<DanmakuItem> items;
 
-        AutoSourceSearchResult(String apiSourceName, List<DanmakuItem> items) {
+        AutoSourceSearchResult(String apiSourceName, String apiBase, List<DanmakuItem> items) {
             this.apiSourceName = apiSourceName;
+            this.apiBase = apiBase;
             this.items = items;
         }
     }
@@ -205,6 +210,7 @@ public class LeoDanmakuService {
         }
         DanmakuManager.lastDanmakuItemMap = resultMap;
         DanmakuManager.lastDanmakuUrlItemMap = urlResultMap;
+        DanmakuManager.cacheDanmakuItems(items);
     }
 
     private static void attachApiSourceName(List<DanmakuItem> items, String apiSourceName) {
@@ -440,7 +446,7 @@ public class LeoDanmakuService {
                             public AutoSourceSearchResult call() throws Exception {
                                 List<DanmakuItem> items = doSearch(source.url, queryInfo, true);
                                 attachApiSourceName(items, source.name);
-                                return new AutoSourceSearchResult(source.name, items);
+                                return new AutoSourceSearchResult(source.name, source.url, items);
                             }
                         });
                 submittedTasks.add(future);
@@ -448,6 +454,7 @@ public class LeoDanmakuService {
             }
 
             SearchResult bestFallback = null;
+            AutoSourceSearchResult bestFallbackSource = null;
             long endTime = System.currentTimeMillis() + AUTO_SEARCH_TIMEOUT_MS;
             while (pendingTasks > 0) {
                 long timeLeft = endTime - System.currentTimeMillis();
@@ -483,20 +490,24 @@ public class LeoDanmakuService {
 
                 if (currentResult.similarity >= AUTO_SOURCE_CONFIDENCE_THRESHOLD) {
                     DanmakuSpider.log("✅ 自动匹配命中可靠结果，取消其他API源 (相似度: " + currentResult.similarity + ")");
+                    scheduleSeriesItemsPrecache(sourceResult, queryInfo);
                     updateLastDanmakuItems(finishedResults);
                     return currentResult;
                 }
 
                 if (bestFallback == null || currentResult.similarity > bestFallback.similarity) {
                     bestFallback = currentResult;
+                    bestFallbackSource = sourceResult;
                 }
             }
 
-            updateLastDanmakuItems(finishedResults);
             if (bestFallback != null) {
                 DanmakuSpider.log("🏁 自动搜索未等到可靠命中，返回当前最佳候选 (相似度: " + bestFallback.similarity + ")");
+                scheduleSeriesItemsPrecache(bestFallbackSource, queryInfo);
+                updateLastDanmakuItems(finishedResults);
                 return bestFallback;
             }
+            updateLastDanmakuItems(finishedResults);
         } catch (Exception e) {
             DanmakuSpider.log("自动搜索异常: " + e.getMessage());
         } finally {
@@ -508,6 +519,53 @@ public class LeoDanmakuService {
 
         DanmakuSpider.log("自动搜索未找到任何结果 for keyword: " + searchKeyword);
         return new SearchResult(false, 0, null);
+    }
+
+    private static void scheduleSeriesItemsPrecache(final AutoSourceSearchResult sourceResult, EpisodeInfo queryInfo) {
+        if (sourceResult == null || queryInfo == null || TextUtils.isEmpty(sourceResult.apiBase)) {
+            return;
+        }
+        final String keyword = queryInfo.getEpisodeNames() != null && !queryInfo.getEpisodeNames().isEmpty()
+                ? queryInfo.getEpisodeNames().get(0)
+                : "";
+        String seriesKey = DanmakuManager.normalizeSeriesKey(keyword);
+        if (TextUtils.isEmpty(seriesKey)) seriesKey = keyword;
+        final String cacheKey = sourceResult.apiBase + "#" + seriesKey;
+        long now = System.currentTimeMillis();
+        Long last = seriesPrecacheTimes.get(cacheKey);
+        if (last != null && now - last < SERIES_PRECACHE_INTERVAL) {
+            return;
+        }
+        seriesPrecacheTimes.put(cacheKey, now);
+
+        final EpisodeInfo cacheQueryInfo = copyEpisodeInfoForKeyword(queryInfo, keyword);
+        seriesPrecacheExecutor.execute(new Runnable() {
+            @Override
+            public void run() {
+                loadSeriesItemsForCache(sourceResult, cacheQueryInfo, keyword);
+            }
+        });
+        DanmakuSpider.log("📚 已安排同系列后台预缓存: " + sourceResult.apiSourceName);
+    }
+
+    private static void loadSeriesItemsForCache(AutoSourceSearchResult sourceResult, EpisodeInfo queryInfo, String keyword) {
+        try {
+            List<DanmakuItem> seriesItems = doSearch(sourceResult.apiBase, queryInfo, false);
+            attachApiSourceName(seriesItems, sourceResult.apiSourceName);
+            if (seriesItems == null || seriesItems.isEmpty()) {
+                DanmakuSpider.log("📚 同系列预缓存无结果: " + sourceResult.apiSourceName);
+                return;
+            }
+            filterByKeyword(seriesItems, keyword);
+            if (seriesItems.isEmpty()) {
+                DanmakuSpider.log("📚 同系列预缓存过滤后无结果: " + sourceResult.apiSourceName);
+                return;
+            }
+            DanmakuManager.cacheDanmakuItems(seriesItems);
+            DanmakuSpider.log("📚 同系列预缓存完成: " + sourceResult.apiSourceName + "，共" + seriesItems.size() + "条");
+        } catch (Exception e) {
+            DanmakuSpider.log("📚 同系列预缓存异常: " + e.getMessage());
+        }
     }
 
     private static SearchResult pickBestAutoMatch(String searchKeyword, EpisodeInfo episodeInfo, List<DanmakuItem> results, String scopeName) {
@@ -698,6 +756,12 @@ public class LeoDanmakuService {
     // 直接推送弹幕URL
     public static void pushDanmakuDirect(DanmakuItem danmakuItem, Activity activity, boolean isAuto) {
         pushDanmakuDirect(danmakuItem, activity, isAuto, false);
+    }
+
+    public static int validateDanmakuItem(DanmakuItem danmakuItem, int timeoutMs) {
+        if (danmakuItem == null || danmakuItem.getEpId() == null || TextUtils.isEmpty(danmakuItem.getApiBase())) return -1;
+        String danmakuData = NetworkUtils.robustHttpGet(danmakuItem.getDanmakuUrl(), timeoutMs, 1, 0);
+        return countDanmakuItems(danmakuData);
     }
 
     public static void pushDanmakuDirect(DanmakuItem danmakuItem, Activity activity, boolean isAuto, boolean forceRefresh) {

@@ -1,7 +1,11 @@
 package com.github.catvod.spider;
 
+import android.text.TextUtils;
+
 import com.github.catvod.spider.entity.DanmakuItem;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -12,6 +16,7 @@ public class DanmakuManager {
     public static String lastDanmakuUrl = ""; // 上次弹幕URL
     public static ConcurrentMap<Integer, DanmakuItem> lastDanmakuItemMap = new ConcurrentHashMap<>();
     public static ConcurrentMap<String, DanmakuItem> lastDanmakuUrlItemMap = new ConcurrentHashMap<>();
+    public static ConcurrentMap<String, DanmakuItem> seriesDanmakuCache = new ConcurrentHashMap<>();
     public static int lastDanmakuId = -1;          // 上次的弹幕ID
     public static boolean hasAutoSearched = false; // 是否已自动搜索过
     public static String lastProcessedTitle = "";  // 上次处理的标题
@@ -34,6 +39,7 @@ public class DanmakuManager {
         if (danmakuItem.getDanmakuUrl() != null) {
             lastDanmakuUrlItemMap.put(danmakuItem.getDanmakuUrl(), danmakuItem);
         }
+        cacheDanmakuItem(danmakuItem);
 
         // 记录视频检测时间
         lastVideoDetectedTime = System.currentTimeMillis();
@@ -47,8 +53,9 @@ public class DanmakuManager {
     }
 
     public static DanmakuItem getNextDanmakuItem(int currentEpisodeNum, int newEpisodeNum) {
-        int nextId = lastDanmakuId + (newEpisodeNum - currentEpisodeNum);
-        DanmakuSpider.log("📝 获取下一个弹幕URL: " + lastDanmakuId + " -> " + nextId);
+        int baseId = lastDanmakuId;
+        int nextId = baseId + (newEpisodeNum - currentEpisodeNum);
+        DanmakuSpider.log("📝 获取下一个弹幕URL: " + baseId + " -> " + nextId);
 
         if (nextId <= 0) {
             return null;
@@ -60,7 +67,41 @@ public class DanmakuManager {
             return nextDanmakuItem;
         }
 
+        DanmakuSpider.log("🧮 ID位移缓存未命中: " + baseId + " -> " + nextId);
         return null;
+    }
+
+    public static void cacheDanmakuItems(List<DanmakuItem> items) {
+        if (items == null) return;
+        for (DanmakuItem item : items) {
+            cacheDanmakuItem(item);
+        }
+    }
+
+    public static void cacheDanmakuItem(DanmakuItem item) {
+        if (item == null || item.getEpId() == null || TextUtils.isEmpty(item.getApiBase())) return;
+        String titleKey = normalizeSeriesKey(getItemSeriesName(item));
+        if (TextUtils.isEmpty(titleKey)) return;
+        seriesDanmakuCache.put(titleKey + "#" + item.getApiBase() + "#" + item.getEpId(), item);
+    }
+
+    public static List<DanmakuItem> getSeriesCacheSnapshot() {
+        return new ArrayList<>(seriesDanmakuCache.values());
+    }
+
+    public static String getItemSeriesName(DanmakuItem item) {
+        if (item == null) return "";
+        if (!TextUtils.isEmpty(item.getAnimeTitle())) return item.getAnimeTitle();
+        return item.getTitle();
+    }
+
+    public static String normalizeSeriesKey(String title) {
+        if (TextUtils.isEmpty(title)) return "";
+        return title
+                .replaceAll("(?i)\\s*from\\s+.*$", "")
+                .replaceAll("\\s*\\(\\d{4}\\)\\s*", "")
+                .replaceAll("[\\s\\p{Punct}，。；：、【】《》“”‘’（）]+", "")
+                .toLowerCase();
     }
 
     public static DanmakuItem getLastDanmakuItem() {
@@ -91,5 +132,6 @@ public class DanmakuManager {
         lastDanmakuUrl = "";
         lastDanmakuItemMap.clear();
         lastDanmakuUrlItemMap.clear();
+        seriesDanmakuCache.clear();
     }
 }
