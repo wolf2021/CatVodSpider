@@ -32,9 +32,14 @@ public class DanmakuScanner {
 
     private static String currentSeriesName = "";
     public static String currentEpisodeNum = "";
+    private static String currentEpisodeYear = "";
+    private static String currentEpisodeSeasonNum = "";
+    private static String currentEpisodeDateCode = "";
+    private static String currentEpisodePartSuffix = "";
     private static long lastEpisodeChangeTime = 0;
     private static final long MIN_EPISODE_CHANGE_INTERVAL = 1000;
     private static String lastEpisodeExtractDebugKey = "";
+    private static String lastEpisodeFeatureDebugKey = "";
 
     // 视频播放状态
     private static boolean isVideoPlaying = false;
@@ -52,12 +57,14 @@ public class DanmakuScanner {
         DanmakuItem danmakuItem;
         Activity activity;
         String title;
+        String videoSignature;
         long scheduleTime;
 
-        PendingPush(DanmakuItem danmakuItem, Activity activity, String title, long scheduleTime) {
+        PendingPush(DanmakuItem danmakuItem, Activity activity, String title, String videoSignature, long scheduleTime) {
             this.danmakuItem = danmakuItem;
             this.activity = activity;
             this.title = title;
+            this.videoSignature = videoSignature;
             this.scheduleTime = scheduleTime;
         }
     }
@@ -71,6 +78,9 @@ public class DanmakuScanner {
     private static Timer hookTimer;
     private static volatile boolean isMonitoring = false;
     private static Timer playbackCheckTimer;
+    private static final String RUNTIME_PREFS_NAME = "leo_danmaku_runtime";
+    private static final String KEY_ACTIVE_INSTANCE_TOKEN = "active_instance_token";
+    private static volatile String activeInstanceToken = "";
     
     // 用于确保run方法串行执行的锁
     private static final Object runLock = new Object();
@@ -90,7 +100,7 @@ public class DanmakuScanner {
     );
 
     private static final Pattern SERIES_NAME_PATTERN = Pattern.compile(
-            "([^0-9:：\\[\\]【】()（）\\-—~～]+?)\\s*[:：\\[\\]【】()（）\\-—~～]*\\s*[0-9]"
+            "(.+?)\\s*(?:第\\s*[零一二三四五六七八九十百千万0-9]+\\s*[集话章回期]|[Ss]\\d{1,2}[Ee]\\d{1,3}|\\b[Ee][Pp]?\\s*\\d{1,3}\\b)"
     );
 
     // 启动Hook监控
@@ -100,6 +110,7 @@ public class DanmakuScanner {
             return;
         }
 
+        claimActiveInstance();
         DanmakuSpider.log("🚀 启动Hook监控");
         isMonitoring = true;
         isFirstDetection = true;
@@ -110,6 +121,10 @@ public class DanmakuScanner {
             public void run() {
                 synchronized (runLock) {
                     try {
+                        if (!isCurrentActiveInstance()) {
+                            stopHookMonitorForTakeover();
+                            return;
+                        }
                         Activity act = Utils.getTopActivity();
                         if (act != null && !act.isFinishing()) {
                             // 检查是否是播放界面
@@ -187,28 +202,95 @@ public class DanmakuScanner {
         startPlaybackCheckTimer();
     }
 
+    private static void claimActiveInstance() {
+        activeInstanceToken = System.currentTimeMillis() + "-" + java.util.UUID.randomUUID();
+        android.content.SharedPreferences prefs = getRuntimePrefs();
+        if (prefs != null) {
+            prefs.edit().putString(KEY_ACTIVE_INSTANCE_TOKEN, activeInstanceToken).commit();
+        }
+    }
+
+    private static boolean isCurrentActiveInstance() {
+        if (TextUtils.isEmpty(activeInstanceToken)) return true;
+        android.content.SharedPreferences prefs = getRuntimePrefs();
+        if (prefs == null) return true;
+        String activeToken = prefs.getString(KEY_ACTIVE_INSTANCE_TOKEN, "");
+        return activeInstanceToken.equals(activeToken);
+    }
+
+    private static android.content.SharedPreferences getRuntimePrefs() {
+        try {
+            android.content.Context context = Init.context();
+            if (context == null) {
+                Activity activity = Utils.getTopActivity();
+                if (activity != null) context = activity.getApplicationContext();
+            }
+            return context != null ? context.getSharedPreferences(RUNTIME_PREFS_NAME, android.content.Context.MODE_PRIVATE) : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static void releaseActiveInstance() {
+        android.content.SharedPreferences prefs = getRuntimePrefs();
+        if (prefs != null) {
+            String activeToken = prefs.getString(KEY_ACTIVE_INSTANCE_TOKEN, "");
+            if (!TextUtils.isEmpty(activeInstanceToken) && activeInstanceToken.equals(activeToken)) {
+                prefs.edit().remove(KEY_ACTIVE_INSTANCE_TOKEN).apply();
+            }
+        }
+        activeInstanceToken = "";
+    }
+
     private static EpisodeInfo getEpisodeInfo(Media media, Activity act) {
         // 提取剧集信息
-        String seriesName = extractSeriesName(media.getTitle());
-        String fileName = normalizePlaybackName(media.getArtist());
-        String episodeNum = extractEpisodeNumFromMedia(media, fileName);
-        String year = extractYear(media.getArtist());
-        if (TextUtils.isEmpty(year)) {
-            year = extractYear2(media.getTitle());
+        String mediaTitle = media != null ? media.getTitle() : "";
+        String mediaArtist = media != null ? media.getArtist() : "";
+        String mediaUrl = media != null ? media.getUrl() : "";
+        String fileName = normalizePlaybackName(mediaArtist);
+        String seriesName = extractSeriesName(mediaTitle);
+        if (TextUtils.isEmpty(seriesName)) {
+            seriesName = extractSeriesName(fileName);
         }
-        String seasonNum = extractSeasonNum(media.getArtist());
+        String episodeNum = extractEpisodeNumFromMedia(media, fileName);
+        String year = extractYear(mediaArtist);
+        if (TextUtils.isEmpty(year)) {
+            year = extractYear2(mediaTitle);
+        }
+        String urlFileName = extractFileNameFromUrl(mediaUrl);
+        String seasonNum = firstNonEmpty(
+                extractSeasonNum(mediaTitle),
+                extractSeasonNum(seriesName),
+                extractSeasonNum(mediaArtist),
+                extractSeasonNum(fileName),
+                extractSeasonNum(urlFileName));
+        String episodeDateCode = firstNonEmpty(
+                DanmakuUtils.extractEpisodeDateCode(fileName),
+                DanmakuUtils.extractEpisodeDateCode(mediaTitle),
+                DanmakuUtils.extractEpisodeDateCode(urlFileName),
+                DanmakuUtils.extractEpisodeDateCode(mediaUrl));
+        if (isDateLikeEpisodeMarker(episodeNum)) {
+            if (TextUtils.isEmpty(episodeDateCode)) {
+                episodeDateCode = episodeNum;
+            }
+            episodeNum = "";
+        }
+        String episodePartSuffix = firstNonEmpty(
+                DanmakuUtils.extractEpisodePartSuffix(fileName),
+                DanmakuUtils.extractEpisodePartSuffix(mediaTitle),
+                DanmakuUtils.extractEpisodePartSuffix(urlFileName));
 
         // 创建剧集名称列表
         List<String> episodeNames = new ArrayList<>();
-        String extractTitle1 = extractTitle(media.getTitle());
+        String extractTitle1 = extractTitle(mediaTitle);
         String extractTitle2 = DanmakuUtils.extractTitle2(extractTitle1);
         String extractTitle3 = null;
         if (!extractTitle2.equals(extractTitle1)) {
-            extractTitle3 = DanmakuUtils.extractTitle2(media.getTitle());
+            extractTitle3 = DanmakuUtils.extractTitle2(mediaTitle);
         }
         String cachedName = SharedPreferencesService.getSearchKeywordCache(act, extractTitle2);
 
-        if (!TextUtils.isEmpty(cachedName) && !cachedName.equals(media.getTitle())) {
+        if (!TextUtils.isEmpty(cachedName) && !cachedName.equals(mediaTitle)) {
             episodeNames.add(cachedName);
         }
         if (!TextUtils.isEmpty(extractTitle2) && !episodeNames.contains(extractTitle2)) {
@@ -220,8 +302,8 @@ public class DanmakuScanner {
         if (!TextUtils.isEmpty(extractTitle3) && !episodeNames.contains(extractTitle3)) {
             episodeNames.add(extractTitle3);
         }
-        if (!TextUtils.isEmpty(media.getTitle()) && !episodeNames.contains(media.getTitle())) {
-            episodeNames.add(media.getTitle());
+        if (!TextUtils.isEmpty(mediaTitle) && !episodeNames.contains(mediaTitle)) {
+            episodeNames.add(mediaTitle);
         }
 
         EpisodeInfo episodeInfo = new EpisodeInfo();
@@ -229,9 +311,12 @@ public class DanmakuScanner {
         episodeInfo.setEpisodeNames(episodeNames);
         episodeInfo.setEpisodeYear(year);
         episodeInfo.setEpisodeSeasonNum(seasonNum);
+        episodeInfo.setEpisodeDateCode(episodeDateCode);
+        episodeInfo.setEpisodePartSuffix(episodePartSuffix);
         episodeInfo.setSeriesName(seriesName);
         episodeInfo.setFileName(fileName);
-        episodeInfo.setEpisodeUrl(media.getUrl());
+        episodeInfo.setEpisodeUrl(mediaUrl);
+        logEpisodeFeatureDebug(episodeInfo);
 
         return episodeInfo;
     }
@@ -239,6 +324,25 @@ public class DanmakuScanner {
     private static String normalizePlaybackName(String text) {
         if (TextUtils.isEmpty(text)) return "";
         return text.replaceFirst("^\\s*正在播放\\s*[:：]?\\s*", "").trim();
+    }
+
+    private static String firstNonEmpty(String... values) {
+        if (values == null) return "";
+        for (String value : values) {
+            if (!TextUtils.isEmpty(value)) return value;
+        }
+        return "";
+    }
+
+    private static boolean isDateLikeEpisodeMarker(String value) {
+        if (TextUtils.isEmpty(value) || !value.matches("(?:19|20)\\d{6}")) return false;
+        try {
+            int month = Integer.parseInt(value.substring(4, 6));
+            int day = Integer.parseInt(value.substring(6, 8));
+            return month >= 1 && month <= 12 && day >= 1 && day <= 31;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private static String extractEpisodeNumFromMedia(Media media, String fileName) {
@@ -328,6 +432,28 @@ public class DanmakuScanner {
         DanmakuSpider.log("🔢 集数提取: " + (TextUtils.isEmpty(episodeNum) ? "未提取" : episodeNum)
                 + "，来源: " + source
                 + "，url=" + shortenForLog(cleanLogText(url), 180));
+        DanmakuSpider.log("🧩 媒体附加特征: date="
+                + DanmakuUtils.extractEpisodeDateCode(fileName + " " + title + " " + urlFileName)
+                + ", part=" + DanmakuUtils.extractEpisodePartSuffix(fileName + " " + title + " " + urlFileName));
+    }
+
+    private static void logEpisodeFeatureDebug(EpisodeInfo episodeInfo) {
+        if (episodeInfo == null) return;
+        String debugKey = safeString(episodeInfo.getSeriesName())
+                + "|" + safeString(episodeInfo.getEpisodeNum())
+                + "|" + safeString(episodeInfo.getEpisodeYear())
+                + "|" + safeString(episodeInfo.getEpisodeSeasonNum())
+                + "|" + safeString(episodeInfo.getEpisodeDateCode())
+                + "|" + safeString(episodeInfo.getEpisodePartSuffix());
+        if (debugKey.equals(lastEpisodeFeatureDebugKey)) return;
+        lastEpisodeFeatureDebugKey = debugKey;
+
+        DanmakuSpider.log("🧩 剧集特征: series=" + safeString(episodeInfo.getSeriesName())
+                + ", ep=" + safeString(episodeInfo.getEpisodeNum())
+                + ", year=" + safeString(episodeInfo.getEpisodeYear())
+                + ", season=" + safeString(episodeInfo.getEpisodeSeasonNum())
+                + ", date=" + safeString(episodeInfo.getEpisodeDateCode())
+                + ", part=" + safeString(episodeInfo.getEpisodePartSuffix()));
     }
 
     private static String cleanLogText(String text) {
@@ -371,6 +497,10 @@ public class DanmakuScanner {
             @Override
             public void run() {
                 try {
+                    if (!isCurrentActiveInstance()) {
+                        stopHookMonitorForTakeover();
+                        return;
+                    }
                     // 检查是否有待推送的任务
 //                    DanmakuSpider.log("检查待推送的任务数量：" + pendingPushes.size());
                     if (!pendingPushes.isEmpty()) {
@@ -415,6 +545,10 @@ public class DanmakuScanner {
                 DanmakuSpider.resetAutoSearch();
                 currentSeriesName = "";
                 currentEpisodeNum = "";
+                currentEpisodeYear = "";
+                currentEpisodeSeasonNum = "";
+                currentEpisodeDateCode = "";
+                currentEpisodePartSuffix = "";
                 lastEpisodeChangeTime = 0;
                 videoPlayStartTime = 0;
 
@@ -464,9 +598,15 @@ public class DanmakuScanner {
         DanmakuManager.lastDanmakuId = -1;
         DanmakuManager.lastManualDanmakuUrl = "";
         DanmakuManager.lastAutoDanmakuUrl = "";
+        lastEpisodeExtractDebugKey = "";
+        lastEpisodeFeatureDebugKey = "";
 
         currentSeriesName = "";
         currentEpisodeNum = "";
+        currentEpisodeYear = "";
+        currentEpisodeSeasonNum = "";
+        currentEpisodeDateCode = "";
+        currentEpisodePartSuffix = "";
         lastEpisodeChangeTime = 0;
         isVideoPlaying = false;
         videoPlayStartTime = 0;
@@ -480,6 +620,11 @@ public class DanmakuScanner {
         for (Map.Entry<String, PendingPush> entry : pendingPushes.entrySet()) {
             PendingPush push = entry.getValue();
             String key = entry.getKey();
+
+            if (!isPendingPushCurrent(push, key)) {
+                pendingPushes.remove(key);
+                continue;
+            }
 
             // 计算等待时间
             long waitTime = currentTime - push.scheduleTime;
@@ -532,6 +677,13 @@ public class DanmakuScanner {
 
     // 执行待推送任务
     private static void executePendingPush(PendingPush push) {
+        if (!isCurrentActiveInstance()) {
+            DanmakuSpider.log("⏭️ 旧实例待推送任务已失效，跳过");
+            return;
+        }
+        if (!isPendingPushCurrent(push, "")) {
+            return;
+        }
         if (push.activity == null || push.activity.isFinishing()) {
             DanmakuSpider.log("⚠️ Activity无效，取消推送");
             return;
@@ -543,6 +695,13 @@ public class DanmakuScanner {
             @Override
             public void run() {
                 try {
+                    if (!isCurrentActiveInstance()) {
+                        DanmakuSpider.log("⏭️ 推送线程检测到新实例接管，跳过旧任务");
+                        return;
+                    }
+                    if (!isPendingPushCurrent(push, "")) {
+                        return;
+                    }
                     LeoDanmakuService.pushDanmakuDirect(push.danmakuItem, push.activity, true);
 
                     // 记录推送时间，防止重复推送
@@ -554,8 +713,35 @@ public class DanmakuScanner {
         }).start();
     }
 
+    private static boolean isPendingPushCurrent(PendingPush push, String key) {
+        if (push == null) return false;
+        String expectedSignature = push.videoSignature;
+        if (!TextUtils.isEmpty(expectedSignature)
+                && !isSameVideo(DanmakuManager.currentVideoSignature, expectedSignature)) {
+            String label = !TextUtils.isEmpty(key)
+                    ? key
+                    : (push.danmakuItem != null ? push.danmakuItem.getDanmakuUrl() : "");
+            DanmakuSpider.log("⏭️ 待推送任务已过期，跳过: " + label
+                    + "，当前=" + DanmakuManager.currentVideoSignature + "，任务=" + expectedSignature);
+            return false;
+        }
+        return true;
+    }
+
     // 停止Hook监控
     public static void stopHookMonitor() {
+        cleanupMonitorState();
+        releaseActiveInstance();
+        DanmakuSpider.log("🛑 Hook监控已停止");
+    }
+
+    private static void stopHookMonitorForTakeover() {
+        boolean wasRunning = isMonitoring || hookTimer != null || playbackCheckTimer != null;
+        cleanupMonitorState();
+        if (wasRunning) DanmakuSpider.log("♻️ 检测到新实例接管，当前实例优雅退出");
+    }
+
+    private static void cleanupMonitorState() {
         isMonitoring = false;
 
         // 取消延迟任务
@@ -578,8 +764,6 @@ public class DanmakuScanner {
         pendingPushes.clear();
         lastPushTime.clear();
         isLeoButtonInjected = false;
-
-        DanmakuSpider.log("🛑 Hook监控已停止");
     }
 
     // 判断是否为播放界面
@@ -624,7 +808,13 @@ public class DanmakuScanner {
 
     // 生成签名
     private static String generateSignature(EpisodeInfo episodeInfo) {
-        return episodeInfo.getEpisodeUrl();
+        if (episodeInfo == null) return "";
+        return safeString(episodeInfo.getEpisodeUrl())
+                + "|" + DanmakuManager.normalizeSeriesKey(episodeInfo.getSeriesName())
+                + "|" + safeString(episodeInfo.getEpisodeDateCode())
+                + "|" + safeString(episodeInfo.getEpisodePartSuffix())
+                + "|" + safeString(episodeInfo.getEpisodeNum())
+                + "|" + safeString(episodeInfo.getEpisodeSeasonNum());
     }
 
     // 判断是否为同一个视频
@@ -671,12 +861,6 @@ public class DanmakuScanner {
                 } else {
                     cleanedTitle = cleanedTitle.substring(firstSpace + 1);
                 }
-            } else {
-                // 原有逻辑作为兜底
-                int spaceIndex = cleanedTitle.indexOf(" ");
-                if (spaceIndex != -1) {
-                    cleanedTitle = cleanedTitle.substring(0, spaceIndex);
-                }
             }
         }
 
@@ -707,35 +891,54 @@ public class DanmakuScanner {
             return "";
         }
 
+        String cleaned = title
+                .replaceFirst("^\\s*[\\[【(（]?\\d+(?:\\.\\d+)?[GMK]B?[\\]】)）]?\\s*", "")
+                .replaceFirst("^\\s*(?:19|20)\\d{2}[年./_\\-]?\\d{1,2}[月./_\\-]?\\d{1,2}日?\\s*", "")
+                .trim();
+        if (TextUtils.isEmpty(cleaned)) cleaned = title.trim();
+
         // 尝试匹配剧集名模式
-        Matcher matcher = SERIES_NAME_PATTERN.matcher(title);
+        Matcher matcher = SERIES_NAME_PATTERN.matcher(cleaned);
         if (matcher.find()) {
             String seriesName = matcher.group(1);
             if (seriesName != null) {
                 seriesName = seriesName.trim();
                 // 清理结尾的标点
                 seriesName = seriesName.replaceAll("[:：\\-—~～\\[\\]【】()（）]+$", "");
-                return seriesName;
+                if (!isEpisodeOnlyTitle(seriesName)) return seriesName;
             }
         }
 
         // 如果找不到模式，尝试提取数字前的部分
-        String[] parts = title.split("[:：\\-—~～]");
+        String[] parts = cleaned.split("[:：\\-—~～]");
         if (parts.length > 0) {
             String firstPart = parts[0].trim();
+            if (isEpisodeOnlyTitle(firstPart)) {
+                return "";
+            }
             // 移除末尾的数字
             firstPart = firstPart.replaceAll("\\s+\\d+$", "");
-            if (!TextUtils.isEmpty(firstPart)) {
+            if (!TextUtils.isEmpty(firstPart) && !isEpisodeOnlyTitle(firstPart)) {
                 return firstPart;
             }
         }
 
-        // 最后手段：移除所有数字和标点
-        return title
-                .replaceAll("\\d+", "")
+        if (cleaned.matches("^\\s*第\\s*[零一二三四五六七八九十百千万0-9]+\\s*[集话章回期]\\s*[上中下]?.*")) {
+            return "";
+        }
+
+        // 最后手段：只移除标点，保留片名里的数字
+        return cleaned
                 .replaceAll("[:：\\-—~～\\[\\]【】()（）]+", " ")
                 .replaceAll("\\s+", " ")
                 .trim();
+    }
+
+    private static boolean isEpisodeOnlyTitle(String title) {
+        if (TextUtils.isEmpty(title)) return true;
+        String text = title.trim();
+        return text.matches("第\\s*[零一二三四五六七八九十百千万0-9]+\\s*[集话章回期]\\s*[上中下]?")
+                || text.matches("(?:19|20)\\d{2}[年./_\\-]?\\d{1,2}[月./_\\-]?\\d{1,2}日?");
     }
 
     // 提取集数
@@ -761,6 +964,13 @@ public class DanmakuScanner {
 
         // 预处理：去掉常见的画质、编码、文件大小等干扰信息
         String processedTitle = preprocessTitle(title).trim();
+
+        if (strictPlayback) {
+            String standaloneEpisode = extractStandalonePlaybackEpisode(processedTitle);
+            if (!TextUtils.isEmpty(standaloneEpisode)) {
+                return standaloneEpisode;
+            }
+        }
 
         // 尝试各种集数格式匹配，按优先级从高到低
 
@@ -810,7 +1020,7 @@ public class DanmakuScanner {
             if (!isLikelyFileSize(processedTitle, matcher.start(1), matcher.end(1))) {
                 // DanmakuSpider.log("匹配完整括号格式: " + num);
                 return num;
-            } else {
+            } else if (logFailure) {
                 DanmakuSpider.log("排除文件大小的情况，跳过: " + num);
             }
         }
@@ -833,7 +1043,7 @@ public class DanmakuScanner {
             if (shouldAcceptLooseEpisodeNumber(processedTitle, numStr, start, end, strictPlayback)) {
                 candidates.add(new MatchCandidate(numStr, start, end,
                         calculatePriority(processedTitle, numStr, start, end)));
-            } else {
+            } else if (logFailure) {
                 DanmakuSpider.log("排除明显不是集数的情况，跳过: " + numStr);
             }
         }
@@ -852,7 +1062,7 @@ public class DanmakuScanner {
             if (shouldAcceptLooseEpisodeNumber(processedTitle, numStr, start, end, strictPlayback)) {
                 candidates.add(new MatchCandidate(numStr, start, end,
                         calculatePriority(processedTitle, numStr, start, end) + 10)); // 额外加分
-            } else {
+            } else if (logFailure) {
                 DanmakuSpider.log("排除文件名格式的情况，跳过: " + numStr);
             }
         }
@@ -942,6 +1152,21 @@ public class DanmakuScanner {
         }
 
         return "";
+    }
+
+    private static String extractStandalonePlaybackEpisode(String title) {
+        if (TextUtils.isEmpty(title)) return "";
+        String trimmed = title.trim();
+        if (!trimmed.matches("\\d{1,3}")) return "";
+
+        try {
+            int value = Integer.parseInt(trimmed);
+            if (value <= 0) return "";
+            if (value > 99 && !trimmed.startsWith("0")) return "";
+            return String.valueOf(value);
+        } catch (NumberFormatException e) {
+            return "";
+        }
     }
 
     /**
@@ -1235,12 +1460,21 @@ public class DanmakuScanner {
             return "";
         }
 
+        Pattern chineseSeasonPattern = Pattern.compile("第\\s*([零一二三四五六七八九十百千万两0-9]+)\\s*[季部]");
+        Matcher chineseMatcher = chineseSeasonPattern.matcher(title);
+        if (chineseMatcher.find()) {
+            String season = convertChineseNumberToArabic(chineseMatcher.group(1));
+            if (!TextUtils.isEmpty(season)) {
+                return season.replaceFirst("^0+(?!$)", "");
+            }
+        }
+
         // 匹配 S01、Season 01、S1 等季数格式
         Pattern seasonPattern = Pattern.compile("[Ss](?:eason)?\\s*(\\d{1,2})");
         Matcher matcher = seasonPattern.matcher(title);
 
         if (matcher.find()) {
-            return matcher.group(1);
+            return matcher.group(1).replaceFirst("^0+(?!$)", "");
         }
 
         return "";
@@ -1249,59 +1483,110 @@ public class DanmakuScanner {
 
     // 中文数字转阿拉伯数字
     private static String convertChineseNumberToArabic(String chineseNum) {
-        Map<Character, Integer> map = new HashMap<>();
-        map.put('零', 0);
-        map.put('一', 1);
-        map.put('二', 2);
-        map.put('三', 3);
-        map.put('四', 4);
-        map.put('五', 5);
-        map.put('六', 6);
-        map.put('七', 7);
-        map.put('八', 8);
-        map.put('九', 9);
-        map.put('十', 10);
-        map.put('百', 100);
-        map.put('千', 1000);
-        map.put('万', 10000);
-
-        try {
-            if (chineseNum.matches("[零一二三四五六七八九十百千万]+")) {
-                int result = 0;
-                int temp = 0;
-                int lastUnit = 1;
-
-                for (int i = chineseNum.length() - 1; i >= 0; i--) {
-                    char c = chineseNum.charAt(i);
-                    if (map.containsKey(c)) {
-                        int value = map.get(c);
-                        if (value >= 10) { // 单位
-                            if (value > lastUnit) {
-                                lastUnit = value;
-                                if (temp == 0) temp = 1;
-                                result += temp * value;
-                                temp = 0;
-                            } else {
-                                lastUnit = value;
-                                temp = temp == 0 ? value : temp * value;
-                            }
-                        } else { // 数字
-                            temp += value;
-                        }
-                    }
-                }
-                result += temp;
-                return String.valueOf(result);
-            }
-        } catch (Exception e) {
-            // 转换失败，尝试直接解析数字
+        if (TextUtils.isEmpty(chineseNum)) {
+            return "";
         }
 
-        // 尝试直接解析为数字
+        String normalized = chineseNum.trim().replace("两", "二");
+        if (TextUtils.isEmpty(normalized)) {
+            return "";
+        }
+
         try {
-            return String.valueOf(Integer.parseInt(chineseNum));
+            return String.valueOf(Integer.parseInt(normalized));
         } catch (NumberFormatException e) {
+            // 继续尝试中文数字解析
+        }
+
+        if (!normalized.matches("[零一二三四五六七八九十百千万]+")) {
             return chineseNum;
+        }
+
+        boolean hasUnit = normalized.matches(".*[十百千万].*");
+        if (!hasUnit) {
+            StringBuilder digits = new StringBuilder();
+            for (int i = 0; i < normalized.length(); i++) {
+                int digit = chineseDigitToInt(normalized.charAt(i));
+                if (digit < 0) return chineseNum;
+                digits.append(digit);
+            }
+            try {
+                return String.valueOf(Integer.parseInt(digits.toString()));
+            } catch (NumberFormatException e) {
+                return chineseNum;
+            }
+        }
+
+        int result = 0;
+        int section = 0;
+        int number = 0;
+        for (int i = 0; i < normalized.length(); i++) {
+            char c = normalized.charAt(i);
+            int value = chineseValueToInt(c);
+            if (value < 0) {
+                return chineseNum;
+            }
+
+            if (value == 0) {
+                continue;
+            }
+
+            if (value < 10) {
+                number = value;
+                continue;
+            }
+
+            if (value == 10000) {
+                section += number;
+                if (section == 0) section = 1;
+                result += section * value;
+                section = 0;
+                number = 0;
+                continue;
+            }
+
+            if (number == 0) number = 1;
+            section += number * value;
+            number = 0;
+        }
+
+        result += section + number;
+        return result > 0 ? String.valueOf(result) : chineseNum;
+    }
+
+    private static int chineseDigitToInt(char c) {
+        switch (c) {
+            case '零': return 0;
+            case '一': return 1;
+            case '二': return 2;
+            case '三': return 3;
+            case '四': return 4;
+            case '五': return 5;
+            case '六': return 6;
+            case '七': return 7;
+            case '八': return 8;
+            case '九': return 9;
+            default: return -1;
+        }
+    }
+
+    private static int chineseValueToInt(char c) {
+        switch (c) {
+            case '零': return 0;
+            case '一': return 1;
+            case '二': return 2;
+            case '三': return 3;
+            case '四': return 4;
+            case '五': return 5;
+            case '六': return 6;
+            case '七': return 7;
+            case '八': return 8;
+            case '九': return 9;
+            case '十': return 10;
+            case '百': return 100;
+            case '千': return 1000;
+            case '万': return 10000;
+            default: return -1;
         }
     }
 
@@ -1319,6 +1604,10 @@ public class DanmakuScanner {
             DanmakuSpider.log("⚠️ 未检测到集数，按当前视频触发自动搜索");
             currentSeriesName = lastEpisodeInfo.getSeriesName();
             currentEpisodeNum = "";
+            currentEpisodeYear = safeString(lastEpisodeInfo.getEpisodeYear());
+            currentEpisodeSeasonNum = safeString(lastEpisodeInfo.getEpisodeSeasonNum());
+            currentEpisodeDateCode = safeString(lastEpisodeInfo.getEpisodeDateCode());
+            currentEpisodePartSuffix = safeString(lastEpisodeInfo.getEpisodePartSuffix());
             lastEpisodeChangeTime = currentTime;
             startAutoSearch(lastEpisodeInfo, activity);
             return;
@@ -1334,11 +1623,35 @@ public class DanmakuScanner {
             DanmakuSpider.log("⏰ 距离上次换集: " + timeSinceLastChange + "ms");
             videoPlayStartTime = System.currentTimeMillis();
 
+            if (hasSeriesVariantChanged(lastEpisodeInfo)) {
+                DanmakuSpider.log("⚠️ 同系列但年份/季数/日期/分段发生变化，跳过ID位移逻辑，转自动搜索");
+                currentEpisodeNum = lastEpisodeInfo.getEpisodeNum();
+                currentEpisodeYear = safeString(lastEpisodeInfo.getEpisodeYear());
+                currentEpisodeSeasonNum = safeString(lastEpisodeInfo.getEpisodeSeasonNum());
+                currentEpisodeDateCode = safeString(lastEpisodeInfo.getEpisodeDateCode());
+                currentEpisodePartSuffix = safeString(lastEpisodeInfo.getEpisodePartSuffix());
+                lastEpisodeChangeTime = currentTime;
+                startAutoSearch(lastEpisodeInfo, activity);
+                return;
+            }
+
             String previousEpisodeNum = currentEpisodeNum;
 
             // 更新记录
             currentEpisodeNum = lastEpisodeInfo.getEpisodeNum();
+            currentEpisodeYear = safeString(lastEpisodeInfo.getEpisodeYear());
+            currentEpisodeSeasonNum = safeString(lastEpisodeInfo.getEpisodeSeasonNum());
+            currentEpisodeDateCode = safeString(lastEpisodeInfo.getEpisodeDateCode());
+            currentEpisodePartSuffix = safeString(lastEpisodeInfo.getEpisodePartSuffix());
             lastEpisodeChangeTime = currentTime;
+
+            if (episodeNumbersEqual(previousEpisodeNum, currentEpisodeNum)) {
+                DanmakuSpider.log("⚠️ 同系列但集数未变化，跳过缓存续推，直接重新搜索"
+                        + " (date=" + safeString(lastEpisodeInfo.getEpisodeDateCode())
+                        + ", part=" + safeString(lastEpisodeInfo.getEpisodePartSuffix()) + ")");
+                iterativeAutoSearch(lastEpisodeInfo, activity);
+                return;
+            }
 
             if (tryPushFromSeriesCache(activity, lastEpisodeInfo, previousEpisodeNum, currentEpisodeNum)) {
                 return;
@@ -1351,10 +1664,35 @@ public class DanmakuScanner {
 
             currentSeriesName = lastEpisodeInfo.getSeriesName();
             currentEpisodeNum = lastEpisodeInfo.getEpisodeNum();
+            currentEpisodeYear = safeString(lastEpisodeInfo.getEpisodeYear());
+            currentEpisodeSeasonNum = safeString(lastEpisodeInfo.getEpisodeSeasonNum());
+            currentEpisodeDateCode = safeString(lastEpisodeInfo.getEpisodeDateCode());
+            currentEpisodePartSuffix = safeString(lastEpisodeInfo.getEpisodePartSuffix());
             lastEpisodeChangeTime = currentTime;
 
             startAutoSearch(lastEpisodeInfo, activity);
         }
+    }
+
+    private static boolean hasSeriesVariantChanged(EpisodeInfo episodeInfo) {
+        if (episodeInfo == null) return false;
+        return isKnownValueChanged(currentEpisodeYear, episodeInfo.getEpisodeYear())
+                || isKnownValueChanged(currentEpisodeSeasonNum, episodeInfo.getEpisodeSeasonNum())
+                || isEpisodeMarkerChanged(currentEpisodeDateCode, episodeInfo.getEpisodeDateCode())
+                || isEpisodeMarkerChanged(currentEpisodePartSuffix, episodeInfo.getEpisodePartSuffix());
+    }
+
+    private static boolean isKnownValueChanged(String oldValue, String newValue) {
+        return !TextUtils.isEmpty(oldValue) && !TextUtils.isEmpty(newValue) && !oldValue.equals(newValue);
+    }
+
+    private static boolean isEpisodeMarkerChanged(String oldValue, String newValue) {
+        if (TextUtils.isEmpty(newValue)) return false;
+        return TextUtils.isEmpty(oldValue) || !oldValue.equals(newValue);
+    }
+
+    private static String safeString(String value) {
+        return value == null ? "" : value;
     }
 
     private static boolean tryPushFromSeriesCache(Activity activity, EpisodeInfo episodeInfo, String previousEpisodeNum, String targetEpisodeNum) {
@@ -1443,8 +1781,41 @@ public class DanmakuScanner {
             return false;
         }
 
+        String itemCompareText = buildDanmakuItemCompareText(item);
+        String requiredDate = episodeInfo.getEpisodeDateCode();
+        if (!TextUtils.isEmpty(requiredDate)) {
+            String itemDate = DanmakuUtils.extractEpisodeDateCode(itemCompareText);
+            if (!TextUtils.isEmpty(itemDate) && !requiredDate.equals(itemDate)) {
+                if (logReject) {
+                    DanmakuSpider.log("🧪 缓存候选拒绝(" + source + "): 日期不匹配，候选="
+                            + itemDate + "，目标=" + requiredDate + " - " + item.toString());
+                }
+                return false;
+            }
+        }
+
+        String requiredPart = episodeInfo.getEpisodePartSuffix();
+        if (!TextUtils.isEmpty(requiredPart)) {
+            String itemPart = DanmakuUtils.extractEpisodePartSuffix(itemCompareText);
+            if (!TextUtils.isEmpty(itemPart) && !requiredPart.equals(itemPart)) {
+                if (logReject) {
+                    DanmakuSpider.log("🧪 缓存候选拒绝(" + source + "): 分段不匹配，候选="
+                            + itemPart + "，目标=" + requiredPart + " - " + item.toString());
+                }
+                return false;
+            }
+        }
+
         DanmakuSpider.log("🧪 缓存候选通过(" + source + "): " + item.getTitle() + " - " + item.getEpTitle());
         return true;
+    }
+
+    private static String buildDanmakuItemCompareText(DanmakuItem item) {
+        if (item == null) return "";
+        return safeString(item.getTitle()) + " " + safeString(item.getAnimeTitle()) + " "
+                + safeString(item.getEpTitle()) + " " + safeString(item.getShortTitle()) + " "
+                + safeString(item.getFrom()) + " " + safeString(item.getAnimeType()) + " "
+                + safeString(item.getTypeDescription());
     }
 
     private static boolean isCachedItemSameSeries(DanmakuItem item, EpisodeInfo episodeInfo) {
@@ -1514,6 +1885,10 @@ public class DanmakuScanner {
             @Override
             public void run() {
                 try {
+                    if (!isCurrentActiveInstance()) {
+                        DanmakuSpider.log("⏭️ 缓存校验线程检测到新实例接管，跳过旧任务");
+                        return;
+                    }
                     int count = LeoDanmakuService.validateDanmakuItem(item, 15000);
                     if (count > 0) {
                         DanmakuSpider.log("✅ 同系列缓存异步校验通过，共" + count + "条: " + item.getDanmakuUrl());
@@ -1521,14 +1896,14 @@ public class DanmakuScanner {
                     }
 
                     DanmakuSpider.log("⚠️ 同系列缓存异步校验失败，准备兜底搜索: " + item.getDanmakuUrl());
-                    if (isSameVideo(DanmakuManager.currentVideoSignature, signature)) {
+                    if (isCurrentActiveInstance() && isSameVideo(DanmakuManager.currentVideoSignature, signature)) {
                         iterativeAutoSearch(episodeInfo, activity);
                     } else {
                         DanmakuSpider.log("缓存校验返回时视频已切换，跳过兜底搜索");
                     }
                 } catch (Exception e) {
                     DanmakuSpider.log("⚠️ 同系列缓存异步校验异常: " + e.getMessage());
-                    if (isSameVideo(DanmakuManager.currentVideoSignature, signature)) {
+                    if (isCurrentActiveInstance() && isSameVideo(DanmakuManager.currentVideoSignature, signature)) {
                         iterativeAutoSearch(episodeInfo, activity);
                     }
                 }
@@ -1576,6 +1951,10 @@ public class DanmakuScanner {
 
     // 安排延迟推送
     private static void scheduleDelayedPush(DanmakuItem item, Activity activity, String title, String pushKey) {
+        if (!isCurrentActiveInstance()) {
+            DanmakuSpider.log("⏭️ 旧实例自动匹配结果已失效，跳过延迟推送");
+            return;
+        }
         if (item == null || TextUtils.isEmpty(item.getDanmakuUrl())) {
             DanmakuSpider.log("⚠️ 待推送弹幕为空，跳过延迟推送");
             return;
@@ -1585,7 +1964,8 @@ public class DanmakuScanner {
             DanmakuSpider.log("⚠️ 最近已推送过该弹幕，跳过延迟推送: " + item.getDanmakuUrl());
             return;
         }
-        PendingPush pendingPush = new PendingPush(item, activity, title, System.currentTimeMillis());
+        String signature = extractSignatureFromPushKey(pushKey);
+        PendingPush pendingPush = new PendingPush(item, activity, title, signature, System.currentTimeMillis());
         if (executeIfReadyToPush(pendingPush, pushKey)) {
             return;
         }
@@ -1597,8 +1977,20 @@ public class DanmakuScanner {
         pendingPushes.put(pushKey, pendingPush);
     }
 
+    private static String extractSignatureFromPushKey(String pushKey) {
+        if (TextUtils.isEmpty(pushKey)) return "";
+        int separator = pushKey.lastIndexOf('#');
+        return separator > 0 ? pushKey.substring(0, separator) : "";
+    }
+
     private static boolean executeIfReadyToPush(PendingPush push, String pushKey) {
         try {
+            if (!isCurrentActiveInstance()) {
+                return false;
+            }
+            if (!isPendingPushCurrent(push, pushKey)) {
+                return true;
+            }
             Media media = getMedia();
             if (media == null || !media.isPlaying()) {
                 return false;
@@ -1627,6 +2019,10 @@ public class DanmakuScanner {
     }
 
     private static void scheduleAutoPush(DanmakuItem item, Activity activity, EpisodeInfo episodeInfo) {
+        if (!isCurrentActiveInstance()) {
+            DanmakuSpider.log("⚠️ 自动匹配结果来自旧实例，跳过延迟推送");
+            return;
+        }
         String signature = episodeInfo != null ? generateSignature(episodeInfo) : "";
         if (!isSameVideo(DanmakuManager.currentVideoSignature, signature)) {
             DanmakuSpider.log("⚠️ 自动匹配结果已过期，跳过延迟推送");
@@ -2098,6 +2494,10 @@ public class DanmakuScanner {
     }
 
     private static void startAutoSearch(EpisodeInfo episodeInfo, final Activity activity) {
+        if (!isCurrentActiveInstance()) {
+            DanmakuSpider.log("❌ 旧实例已被接管，跳过自动搜索");
+            return;
+        }
         DanmakuConfig config = DanmakuConfigManager.getConfig(activity);
 
         // 检查自动推送状态
@@ -2111,6 +2511,10 @@ public class DanmakuScanner {
 
     private static void iterativeAutoSearch(EpisodeInfo episodeInfo, final Activity activity) {
         new Thread(() -> {
+            if (!isCurrentActiveInstance()) {
+                DanmakuSpider.log("❌ 旧实例搜索线程已被接管，跳过自动搜索");
+                return;
+            }
             List<String> episodeNames = episodeInfo.getEpisodeNames();
             if (episodeNames == null || episodeNames.isEmpty()) {
                 DanmakuSpider.log("❌ 剧集名称列表为空，无法执行迭代搜索");
@@ -2122,6 +2526,10 @@ public class DanmakuScanner {
             DanmakuSpider.log("迭代列表：" + episodeNames);
 
             for (String name : episodeNames) {
+                if (!isCurrentActiveInstance()) {
+                    DanmakuSpider.log("❌ 旧实例搜索线程已被接管，停止迭代搜索");
+                    return;
+                }
                 if (TextUtils.isEmpty(name)) continue;
 
                 DanmakuSpider.log("🔍 迭代搜索中，尝试名称: " + name);

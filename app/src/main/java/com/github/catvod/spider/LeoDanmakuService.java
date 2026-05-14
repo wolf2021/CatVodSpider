@@ -622,11 +622,27 @@ public class LeoDanmakuService {
         List<DanmakuItem> matchedItems = new ArrayList<>();
         DanmakuItem preferredSourceItem = getPreferredSourceItemForSearch(searchKeyword, episodeInfo);
         boolean hasEpisodeNum = !TextUtils.isEmpty(episodeInfo.getEpisodeNum());
+        String requiredSeason = normalizeNumberText(episodeInfo.getEpisodeSeasonNum());
+        String episodeInfoCompareText = buildEpisodeInfoCompareText(episodeInfo);
+        String requiredDate = episodeInfo.getEpisodeDateCode();
+        if (TextUtils.isEmpty(requiredDate)) {
+            requiredDate = DanmakuUtils.extractEpisodeDateCode(episodeInfoCompareText);
+        }
+        String requiredPart = episodeInfo.getEpisodePartSuffix();
+        if (TextUtils.isEmpty(requiredPart)) {
+            requiredPart = extractEpisodePartSuffix(episodeInfoCompareText);
+        }
         String episodeRequirement = hasEpisodeNum ? episodeInfo.getEpisodeNum() : "无，启用电影/综艺兜底";
         if (preferredSourceItem != null) {
             DanmakuSpider.log("🧭 自动续集匹配锁定上一集来源: " + DanmakuManager.getDisplaySource(preferredSourceItem));
         }
         DanmakuSpider.log("📥 " + scopeName + " 开始筛选，原始结果数: " + results.size() + "，集数要求: " + episodeRequirement);
+        DanmakuSpider.log("🧩 " + scopeName + " 筛选要求: year=" + safe(episodeInfo.getEpisodeYear())
+                + ", season=" + safe(requiredSeason)
+                + ", date=" + safe(requiredDate)
+                + ", part=" + safe(requiredPart));
+        int noEpisodeTypeMismatchCount = 0;
+        List<String> noEpisodeTypeMismatchSamples = new ArrayList<>();
         for (int i = 0; i < results.size(); i++) {
             DanmakuItem item = results.get(i);
 
@@ -642,6 +658,23 @@ public class LeoDanmakuService {
                         DanmakuSpider.log("  ❌ 年份不匹配: " + item.title + " (要求年份: " + episodeInfo.getEpisodeYear() + ")");
                         isMatch = false;
                     }
+                }
+            }
+
+            if (isMatch && !TextUtils.isEmpty(requiredDate)) {
+                String itemDate = DanmakuUtils.extractEpisodeDateCode(buildItemCompareText(item));
+                if (!TextUtils.isEmpty(itemDate) && !requiredDate.equals(itemDate)) {
+                    DanmakuSpider.log("  ❌ 日期不匹配: " + item.title + " - " + item.epTitle
+                            + " (要求: " + requiredDate + "，候选: " + itemDate + ")");
+                    isMatch = false;
+                }
+            }
+
+            if (isMatch && !TextUtils.isEmpty(requiredSeason)) {
+                String itemSeason = extractSeasonNumber(buildItemCompareText(item));
+                if (!TextUtils.isEmpty(itemSeason) && !requiredSeason.equals(itemSeason)) {
+                    DanmakuSpider.log("  ❌ 季数不匹配: " + item.title + " (要求季数: " + requiredSeason + "，候选季数: " + itemSeason + ")");
+                    isMatch = false;
                 }
             }
 
@@ -689,8 +722,20 @@ public class LeoDanmakuService {
             }
 
             if (isMatch && !hasEpisodeNum && !isNoEpisodeAutoCandidate(item, results)) {
-                DanmakuSpider.log("  ❌ 无集数兜底候选类型不匹配: " + item.title + " - " + item.epTitle);
+                noEpisodeTypeMismatchCount++;
+                if (noEpisodeTypeMismatchSamples.size() < 3) {
+                    noEpisodeTypeMismatchSamples.add(item.title + " - " + item.epTitle);
+                }
                 isMatch = false;
+            }
+
+            if (isMatch && !TextUtils.isEmpty(requiredPart)) {
+                String itemPart = extractEpisodePartSuffix(buildItemCompareText(item));
+                if (!TextUtils.isEmpty(itemPart) && !requiredPart.equals(itemPart)) {
+                    DanmakuSpider.log("  ❌ 分段不匹配: " + item.title + " - " + item.epTitle
+                            + " (要求: " + requiredPart + "，候选: " + itemPart + ")");
+                    isMatch = false;
+                }
             }
 
             if (isMatch && preferredSourceItem != null && !DanmakuManager.isSameDanmakuSource(item, preferredSourceItem)) {
@@ -701,9 +746,19 @@ public class LeoDanmakuService {
             }
 
             if (isMatch) {
-                DanmakuSpider.log("  ✅ 匹配成功: " + item.title + " - " + item.epTitle);
+                String itemCompareText = buildItemCompareText(item);
+                DanmakuSpider.log("  ✅ 匹配成功: " + item.title + " - " + item.epTitle
+                        + " (date=" + DanmakuUtils.extractEpisodeDateCode(itemCompareText)
+                        + ", part=" + extractEpisodePartSuffix(itemCompareText) + ")");
                 matchedItems.add(item);
             }
+        }
+        if (!hasEpisodeNum && noEpisodeTypeMismatchCount > 0) {
+            String sampleText = noEpisodeTypeMismatchSamples.isEmpty()
+                    ? ""
+                    : "，示例: " + TextUtils.join(" | ", noEpisodeTypeMismatchSamples)
+                    + (noEpisodeTypeMismatchCount > noEpisodeTypeMismatchSamples.size() ? " 等" : "");
+            DanmakuSpider.log("  ❌ 无集数兜底候选类型不匹配: " + noEpisodeTypeMismatchCount + " 条" + sampleText);
         }
         DanmakuSpider.log("📤 " + scopeName + " 筛选完成，匹配结果数: " + matchedItems.size());
 
@@ -773,6 +828,85 @@ public class LeoDanmakuService {
     private static String buildItemEpisodeText(DanmakuItem item) {
         if (item == null) return "";
         return safe(item.epTitle) + " " + safe(item.shortTitle);
+    }
+
+    private static String buildEpisodeInfoCompareText(EpisodeInfo episodeInfo) {
+        if (episodeInfo == null) return "";
+        StringBuilder sb = new StringBuilder();
+        sb.append(safe(episodeInfo.getSeriesName())).append(' ');
+        sb.append(safe(episodeInfo.getFileName())).append(' ');
+        sb.append(safe(episodeInfo.getEpisodeDateCode())).append(' ');
+        sb.append(safe(episodeInfo.getEpisodePartSuffix())).append(' ');
+        if (episodeInfo.getEpisodeNames() != null) {
+            for (String name : episodeInfo.getEpisodeNames()) {
+                sb.append(safe(name)).append(' ');
+            }
+        }
+        return sb.toString();
+    }
+
+    private static String extractSeasonNumber(String text) {
+        if (TextUtils.isEmpty(text)) return "";
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
+                "(?i)(?:第\\s*([零一二三四五六七八九十两0-9]+)\\s*[季部]|season\\s*([0-9]{1,2})|s([0-9]{1,2})(?:e[0-9]{1,3})?)");
+        java.util.regex.Matcher matcher = pattern.matcher(text);
+        while (matcher.find()) {
+            String value = firstNonEmptyGroup(matcher, 1, 2, 3);
+            value = normalizeNumberText(value);
+            if (!TextUtils.isEmpty(value)) return value;
+        }
+        return "";
+    }
+
+    private static String extractEpisodePartSuffix(String text) {
+        return DanmakuUtils.extractEpisodePartSuffix(text);
+    }
+
+    private static String firstNonEmptyGroup(java.util.regex.Matcher matcher, int... groups) {
+        if (matcher == null || groups == null) return "";
+        for (int group : groups) {
+            String value = matcher.group(group);
+            if (!TextUtils.isEmpty(value)) return value;
+        }
+        return "";
+    }
+
+    private static String normalizeNumberText(String value) {
+        if (TextUtils.isEmpty(value)) return "";
+        value = value.trim();
+        if (value.matches("\\d+")) {
+            return String.valueOf(Integer.parseInt(value.replaceFirst("^0+(?!$)", "")));
+        }
+        int chinese = parseSmallChineseNumber(value);
+        return chinese > 0 ? String.valueOf(chinese) : "";
+    }
+
+    private static int parseSmallChineseNumber(String value) {
+        if (TextUtils.isEmpty(value)) return 0;
+        value = value.replace("两", "二").replace("零", "");
+        if (value.matches("[一二三四五六七八九]")) return chineseDigit(value.charAt(0));
+        int tenIndex = value.indexOf("十");
+        if (tenIndex >= 0) {
+            int tens = tenIndex == 0 ? 1 : chineseDigit(value.charAt(tenIndex - 1));
+            int ones = tenIndex == value.length() - 1 ? 0 : chineseDigit(value.charAt(tenIndex + 1));
+            return tens * 10 + ones;
+        }
+        return 0;
+    }
+
+    private static int chineseDigit(char c) {
+        switch (c) {
+            case '一': return 1;
+            case '二': return 2;
+            case '三': return 3;
+            case '四': return 4;
+            case '五': return 5;
+            case '六': return 6;
+            case '七': return 7;
+            case '八': return 8;
+            case '九': return 9;
+            default: return 0;
+        }
     }
 
     private static boolean containsAnyYear(String text) {
@@ -870,6 +1004,8 @@ public class LeoDanmakuService {
         copy.setEpisodeNum(source.getEpisodeNum());
         copy.setEpisodeYear(source.getEpisodeYear());
         copy.setEpisodeSeasonNum(source.getEpisodeSeasonNum());
+        copy.setEpisodeDateCode(source.getEpisodeDateCode());
+        copy.setEpisodePartSuffix(source.getEpisodePartSuffix());
         copy.setSeriesName(source.getSeriesName());
         copy.setFileName(source.getFileName());
         copy.setEpisodeUrl(source.getEpisodeUrl());

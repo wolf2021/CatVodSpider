@@ -7,6 +7,8 @@ public class EpisodeInfo {
     private List<String> episodeNames;
     private String episodeYear;
     private String episodeSeasonNum;
+    private String episodeDateCode;
+    private String episodePartSuffix;
     private String seriesName;
     private String fileName;
     private String episodeUrl;
@@ -43,6 +45,22 @@ public class EpisodeInfo {
         this.episodeSeasonNum = episodeSeasonNum;
     }
 
+    public String getEpisodeDateCode() {
+        return episodeDateCode;
+    }
+
+    public void setEpisodeDateCode(String episodeDateCode) {
+        this.episodeDateCode = episodeDateCode;
+    }
+
+    public String getEpisodePartSuffix() {
+        return episodePartSuffix;
+    }
+
+    public void setEpisodePartSuffix(String episodePartSuffix) {
+        this.episodePartSuffix = episodePartSuffix;
+    }
+
     public String getSeriesName() {
         return seriesName;
     }
@@ -74,6 +92,8 @@ public class EpisodeInfo {
                 ", episodeNames=" + episodeNames +
                 ", episodeYear='" + episodeYear + '\'' +
                 ", episodeSeasonNum='" + episodeSeasonNum + '\'' +
+                ", episodeDateCode='" + episodeDateCode + '\'' +
+                ", episodePartSuffix='" + episodePartSuffix + '\'' +
                 ", seriesName='" + seriesName + '\'' +
                 ", fileName='" + fileName + '\'' +
                 ", episodeUrl='" + episodeUrl + '\'' +

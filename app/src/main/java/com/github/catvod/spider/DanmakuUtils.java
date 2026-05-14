@@ -146,10 +146,10 @@ public class DanmakuUtils {
 
         String result = src.trim();
 
-        // 移除集数信息（更彻底）
-        result = result.replaceAll("第\\s*[0-9零一二三四五六七八九十百千]+\\s*[集話话]", "");
-        result = result.replaceAll("[Ee][Pp]?\\s*\\d+", "");
-        result = result.replaceAll("S\\d+", "");
+        // 移除集数信息（更彻底），但不要误删标题里的普通数字，例如“20岁”
+        result = result.replaceAll("第\\s*[0-9零一二三四五六七八九十百千万]+\\s*[集話话期]\\s*[上中下]?", " ");
+        result = result.replaceAll("(?i)\\b[Ee][Pp]?\\s*\\d+\\b", " ");
+        result = result.replaceAll("(?i)\\bS\\d{1,2}(?:E\\d{1,3})?\\b", " ");
         result = result.replaceAll("\\d+[Kk]", "");
         // 移除文件大小信息
         result = result.replaceAll("\\[\\d+[\\.\\d]*[MGT]\\]", "");
@@ -163,25 +163,18 @@ public class DanmakuUtils {
         result = result.replaceAll("\\[.*?\\]", "");
         result = result.replaceAll("\\(.*?\\)", "");
         // 移除特殊字符
-        result = result.replaceAll("[\\\\/:*\"<>|丨]", "");
+        result = result.replaceAll("[\\\\/:*\"<>|丨]", " ");
         // 清理中文标点
         result = result.replaceAll("[:：]", " ");
 
-        // 提取中文部分（如果有）
-        String chinesePart = "";
-        Matcher chineseMatcher = Pattern.compile("[\\u4e00-\\u9fff]+").matcher(result);
-        if (chineseMatcher.find()) {
-            // 获取所有中文字符序列
-            StringBuilder sb = new StringBuilder();
-            while (chineseMatcher.find()) {
-                sb.append(chineseMatcher.group());
-            }
-            chinesePart = sb.toString();
-        }
+        String compact = result
+                .replaceAll("[^\\u4e00-\\u9fffA-Za-z0-9]+", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
 
-        // 如果找到中文部分，优先使用中文
-        if (!TextUtils.isEmpty(chinesePart)) {
-            result = chinesePart.trim();
+        // 如果有中文，保留中文、字母和数字，避免把“怦然心动20岁”清成“岁”
+        if (compact.matches(".*[\\u4e00-\\u9fff].*")) {
+            result = compact;
         } else {
             // 否则清理多余空格
             result = result.replaceAll("\\s+", " ").trim();
@@ -192,5 +185,49 @@ public class DanmakuUtils {
         }
 
         return result;
+    }
+
+    public static String extractEpisodeDateCode(String text) {
+        if (TextUtils.isEmpty(text)) return "";
+
+        Pattern pattern = Pattern.compile(
+                "(?<!\\d)((?:19|20)\\d{2})\\s*[年./_\\-]?\\s*([01]?\\d)\\s*[月./_\\-]?\\s*([0-3]?\\d)\\s*日?(?!\\d)");
+        Matcher matcher = pattern.matcher(text);
+        while (matcher.find()) {
+            String code = normalizeDateCode(matcher.group(1), matcher.group(2), matcher.group(3));
+            if (!TextUtils.isEmpty(code)) return code;
+        }
+
+        return "";
+    }
+
+    private static String normalizeDateCode(String yearText, String monthText, String dayText) {
+        try {
+            int year = Integer.parseInt(yearText);
+            int month = Integer.parseInt(monthText);
+            int day = Integer.parseInt(dayText);
+            if (year < 1900 || year > 2099) return "";
+            if (month < 1 || month > 12) return "";
+            if (day < 1 || day > 31) return "";
+            return String.format(Locale.US, "%04d%02d%02d", year, month, day);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    public static String extractEpisodePartSuffix(String text) {
+        if (TextUtils.isEmpty(text)) return "";
+
+        Pattern episodePartPattern = Pattern.compile("第\\s*[零一二三四五六七八九十百千万0-9]+\\s*[期集]\\s*([上中下])");
+        Matcher matcher = episodePartPattern.matcher(text);
+        if (matcher.find()) return matcher.group(1);
+
+        Pattern specialPartPattern = Pattern.compile(
+                "(?:先导片|纯享(?:版)?|加更(?:版)?|花絮|特别篇|特别企划|番外|SP|OVA|OAD)\\s*([上中下])",
+                Pattern.CASE_INSENSITIVE);
+        matcher = specialPartPattern.matcher(text);
+        if (matcher.find()) return matcher.group(1);
+
+        return "";
     }
 }
