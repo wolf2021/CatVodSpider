@@ -2030,6 +2030,26 @@ public class DanmakuScanner {
         }
         String url = item != null ? item.getDanmakuUrl() : "";
         String pushKey = (TextUtils.isEmpty(signature) ? "unknown" : signature) + "#" + url;
+
+        if (activity != null && !activity.isFinishing() && LeoDanmakuService.canPushDanmakuByReflection(activity)) {
+            DanmakuSpider.log("⚡ 宿主支持反射推送，跳过播放等待，立即执行: " + pushKey);
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        LeoDanmakuService.pushDanmakuDirect(item, activity, true);
+                        if (item != null && !TextUtils.isEmpty(item.getDanmakuUrl())) {
+                            lastPushTime.put(item.getDanmakuUrl(), System.currentTimeMillis());
+                        }
+                    } catch (Exception e) {
+                        DanmakuSpider.log("⚠️ 立即反射推送失败，回退等待播放: " + e.getMessage());
+                        scheduleDelayedPush(item, activity, episodeInfo != null ? episodeInfo.getFileName() : "", pushKey);
+                    }
+                }
+            }).start();
+            return;
+        }
+
         scheduleDelayedPush(item, activity, episodeInfo != null ? episodeInfo.getFileName() : "", pushKey);
     }
 
