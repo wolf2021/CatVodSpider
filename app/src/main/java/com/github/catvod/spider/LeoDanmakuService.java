@@ -8,6 +8,7 @@ import com.github.catvod.spider.entity.DanmakuItem;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -39,6 +40,11 @@ public class LeoDanmakuService {
     private static final int AUTO_EMPTY_POLL_MS = 1500;
     private static final int MANUAL_EMPTY_POLL_MS = 8000;
     private static final double AUTO_SOURCE_CONFIDENCE_THRESHOLD = 0.85;
+    private static final long REFLECTION_RESOLVE_FAILURE_COOLDOWN_MS = 5000;
+    private static volatile ReflectionBinding reflectionBindingCache;
+    private static volatile long lastReflectionResolveFailureAtMs = 0;
+    private static volatile String lastReflectionResolveFailureKey = "";
+    private static volatile String lastReflectionResolveFailureReason = "";
 
     // 新增：搜索结果封装类
     public static class SearchResult {
@@ -186,6 +192,7 @@ public class LeoDanmakuService {
 
     private static void filterByKeyword(List<DanmakuItem> items, String keyword) {
         if (items == null || TextUtils.isEmpty(keyword)) return;
+        List<String> keywordAliases = buildKeywordAliases(keyword);
         Iterator<DanmakuItem> it = items.iterator();
         while (it.hasNext()) {
             DanmakuItem item = it.next();
@@ -193,14 +200,46 @@ public class LeoDanmakuService {
                 it.remove();
                 continue;
             }
-            if (!item.title.contains(keyword) && !keyword.contains(item.title)) {
-                String kClean = keyword.replaceAll("\\s+", "");
-                String tClean = item.title.replaceAll("\\s+", "");
-                if (!tClean.contains(kClean) && !kClean.contains(tClean)) {
-                    it.remove();
+            if (!matchesKeywordAliases(item, keywordAliases)) {
+                it.remove();
+            }
+        }
+    }
+
+    private static class ReflectionBinding {
+        final String cacheKey;
+        final WeakReference<Object> playerRef;
+        final Class<?> danmakuClass;
+        final Method setDanmakuMethod;
+        final long resolvedAtMs;
+
+        ReflectionBinding(String cacheKey, Object player, Class<?> danmakuClass, Method setDanmakuMethod, long resolvedAtMs) {
+            this.cacheKey = cacheKey;
+            this.playerRef = new WeakReference<>(player);
+            this.danmakuClass = danmakuClass;
+            this.setDanmakuMethod = setDanmakuMethod;
+            this.resolvedAtMs = resolvedAtMs;
+        }
+    }
+
+    private static boolean matchesKeywordAliases(DanmakuItem item, List<String> keywordAliases) {
+        if (item == null || keywordAliases == null || keywordAliases.isEmpty()) return false;
+        String[] candidates = new String[]{
+                item.title,
+                item.animeTitle,
+                item.getTitleWithEp()
+        };
+        for (String candidate : candidates) {
+            if (TextUtils.isEmpty(candidate)) continue;
+            String normalizedCandidate = normalizeKeywordForMatch(candidate);
+            for (String alias : keywordAliases) {
+                if (TextUtils.isEmpty(alias)) continue;
+                if (normalizedCandidate.contains(alias) || alias.contains(normalizedCandidate)) {
+                    return true;
                 }
             }
         }
+        return false;
     }
 
     private static void updateLastDanmakuItems(List<DanmakuItem> items) {
@@ -236,27 +275,12 @@ public class LeoDanmakuService {
         List<DanmakuItem> list = new ArrayList<>();
         try {
             String keyword = episodeInfo.getEpisodeNames().get(0);
-            // 尝试多种API路径
-            String searchUrl = apiBase + "/api/v2/search/episodes?anime=" +
-                URLEncoder.encode(keyword, "UTF-8");
-            // 如果 useEpisodeNum 为 true 且 episodeNum 不为空，拼接 episode 参数
-            if (useEpisodeNum && !TextUtils.isEmpty(episodeInfo.getEpisodeNum())) {
-                searchUrl += "&episode=" + URLEncoder.encode(episodeInfo.getEpisodeNum(), "UTF-8");
-            }
-            DanmakuSpider.log("搜索URL: " + searchUrl);
-
-            String json = getSearchResponse(searchUrl, useEpisodeNum);
-
-            // 回退到旧API
-            if (TextUtils.isEmpty(json)) {
-                searchUrl = apiBase + "/search/episodes?anime=" +
-                    URLEncoder.encode(keyword, "UTF-8");
-                // 如果 useEpisodeNum 为 true 且 episodeNum 不为空，拼接 episode 参数
-                if (useEpisodeNum && !TextUtils.isEmpty(episodeInfo.getEpisodeNum())) {
-                    searchUrl += "&episode=" + URLEncoder.encode(episodeInfo.getEpisodeNum(), "UTF-8");
-                }
-                DanmakuSpider.log("回退搜索URL: " + searchUrl);
-                json = getSearchResponse(searchUrl, useEpisodeNum);
+            String json = "";
+            for (String alias : buildKeywordAliases(keyword)) {
+                json = getSearchResponse(buildSearchUrl(apiBase, "/api/v2/search/episodes", alias, episodeInfo, useEpisodeNum), useEpisodeNum);
+                if (!TextUtils.isEmpty(json)) break;
+                json = getSearchResponse(buildSearchUrl(apiBase, "/search/episodes", alias, episodeInfo, useEpisodeNum), useEpisodeNum);
+                if (!TextUtils.isEmpty(json)) break;
             }
 
             if (TextUtils.isEmpty(json)) {
@@ -321,6 +345,15 @@ public class LeoDanmakuService {
         }
 
         return list;
+    }
+
+    private static String buildSearchUrl(String apiBase, String path, String keyword, EpisodeInfo episodeInfo, boolean useEpisodeNum) throws Exception {
+        String searchUrl = apiBase + path + "?anime=" + URLEncoder.encode(keyword, "UTF-8");
+        if (useEpisodeNum && episodeInfo != null && !TextUtils.isEmpty(episodeInfo.getEpisodeNum())) {
+            searchUrl += "&episode=" + URLEncoder.encode(episodeInfo.getEpisodeNum(), "UTF-8");
+        }
+        DanmakuSpider.log("搜索URL: " + searchUrl);
+        return searchUrl;
     }
 
     private static String getSearchResponse(String searchUrl, boolean isAuto) {
@@ -863,6 +896,69 @@ public class LeoDanmakuService {
         return "";
     }
 
+    private static List<String> buildKeywordAliases(String keyword) {
+        List<String> aliases = new ArrayList<>();
+        addKeywordAlias(aliases, keyword);
+        if (TextUtils.isEmpty(keyword)) return aliases;
+
+        String season = extractSeasonNumber(keyword);
+        if (TextUtils.isEmpty(season)) return aliases;
+
+        String chineseSeason = toChineseSeasonNumber(season);
+        if (!TextUtils.isEmpty(chineseSeason)) {
+            addKeywordAlias(aliases, keyword.replaceAll("第\\s*" + java.util.regex.Pattern.quote(season) + "\\s*[季部]", "第" + chineseSeason + "季"));
+            addKeywordAlias(aliases, keyword.replaceAll("第\\s*[零一二三四五六七八九十两0-9]+\\s*[季部]", "第" + chineseSeason + "季"));
+        }
+
+        addKeywordAlias(aliases, keyword.replaceAll("第\\s*[零一二三四五六七八九十两0-9]+\\s*[季部]", "第" + season + "季"));
+        addKeywordAlias(aliases, keyword.replaceAll("(?i)season\\s*\\d{1,2}", "Season " + season));
+        addKeywordAlias(aliases, keyword.replaceAll("(?i)s\\s*\\d{1,2}", "S" + season));
+
+        return aliases;
+    }
+
+    private static void addKeywordAlias(List<String> aliases, String value) {
+        if (aliases == null || TextUtils.isEmpty(value)) return;
+        String normalized = normalizeKeywordForMatch(value);
+        if (TextUtils.isEmpty(normalized) || aliases.contains(normalized)) return;
+        aliases.add(normalized);
+    }
+
+    private static String normalizeKeywordForMatch(String text) {
+        if (TextUtils.isEmpty(text)) return "";
+        String normalized = text;
+        String season = extractSeasonNumber(normalized);
+        if (!TextUtils.isEmpty(season)) {
+            normalized = normalized.replaceAll("(?i)season\\s*\\d{1,2}", "第" + season + "季");
+            normalized = normalized.replaceAll("(?i)s\\s*" + java.util.regex.Pattern.quote(season) + "(?!\\d)", "第" + season + "季");
+            normalized = normalized.replaceAll("第\\s*[零一二三四五六七八九十两0-9]+\\s*[季部]", "第" + season + "季");
+        }
+        return normalized.replaceAll("\\s+", "").trim().toLowerCase();
+    }
+
+    private static String toChineseSeasonNumber(String value) {
+        String normalized = normalizeNumberText(value);
+        if (TextUtils.isEmpty(normalized)) return "";
+        int number;
+        try {
+            number = Integer.parseInt(normalized);
+        } catch (Exception e) {
+            return "";
+        }
+        if (number <= 0) return "";
+        if (number < 10) {
+            return new String[]{"", "一", "二", "三", "四", "五", "六", "七", "八", "九"}[number];
+        }
+        if (number == 10) return "十";
+        if (number < 20) return "十" + toChineseSeasonNumber(String.valueOf(number - 10));
+        if (number < 100) {
+            int tens = number / 10;
+            int ones = number % 10;
+            return toChineseSeasonNumber(String.valueOf(tens)) + "十" + (ones > 0 ? toChineseSeasonNumber(String.valueOf(ones)) : "");
+        }
+        return normalized;
+    }
+
     private static String extractEpisodePartSuffix(String text) {
         return DanmakuUtils.extractEpisodePartSuffix(text);
     }
@@ -1296,81 +1392,55 @@ public class LeoDanmakuService {
     private static boolean tryPushDanmakuByReflection(final DanmakuItem danmakuItem, final Activity activity, final String danmakuPath) {
         if (activity == null || TextUtils.isEmpty(danmakuPath)) return false;
 
-        final int maxAttempts = 4;
-        String lastError = null;
-        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            final CountDownLatch latch = new CountDownLatch(1);
-            final boolean[] success = new boolean[]{false};
-            final String[] error = new String[]{null};
+        final ReflectionBinding binding = resolveReflectionBinding(activity);
+        if (binding == null) return false;
 
-            Runnable task = new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                    Class<?> danmakuClass = resolveHostDanmakuClass(activity);
-                    if (danmakuClass == null) {
-                        error[0] = "未找到宿主Danmaku类";
-                        return;
-                    }
-                    Object player = resolveFongMiPlayer(activity, danmakuClass);
+        final CountDownLatch latch = new CountDownLatch(1);
+        final boolean[] success = new boolean[]{false};
+        final String[] error = new String[]{null};
+
+        Runnable task = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Object player = binding.playerRef.get();
                     if (player == null) {
-                        error[0] = "未找到宿主播放器实例";
+                        clearReflectionBindingCache();
+                        error[0] = "宿主播放器缓存已失效";
                         return;
                     }
-                    Object danmaku = createFongMiDanmaku(activity, danmakuItem, danmakuPath, danmakuClass);
+                    Object danmaku = createFongMiDanmaku(activity, danmakuItem, danmakuPath, binding.danmakuClass);
                     if (danmaku == null) {
                         error[0] = "未能构造宿主弹幕对象";
                         return;
                     }
-                    Method setDanmaku = findDanmakuMethod(player.getClass(), danmakuClass);
-                    if (setDanmaku == null) {
-                        error[0] = "宿主目标缺少setDanmaku/o方法: " + player.getClass().getName();
-                        return;
-                    }
-                    setDanmaku.setAccessible(true);
-                    setDanmaku.invoke(player, danmaku);
+                    binding.setDanmakuMethod.setAccessible(true);
+                    binding.setDanmakuMethod.invoke(player, danmaku);
                     success[0] = true;
-                    } catch (Throwable e) {
-                        error[0] = e.getClass().getSimpleName() + ": " + e.getMessage();
-                    } finally {
-                        latch.countDown();
-                    }
-                }
-            };
-
-            if (Looper.myLooper() == Looper.getMainLooper()) {
-                task.run();
-            } else {
-                activity.runOnUiThread(task);
-                try {
-                    latch.await(3, TimeUnit.SECONDS);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    error[0] = "等待主线程反射推送被中断";
+                } catch (Throwable e) {
+                    clearReflectionBindingCache();
+                    error[0] = e.getClass().getSimpleName() + ": " + e.getMessage();
+                } finally {
+                    latch.countDown();
                 }
             }
+        };
 
-            if (success[0]) {
-                if (attempt > 1) DanmakuSpider.log("反射推送重试命中，第 " + attempt + " 次成功");
-                return true;
-            }
-
-            lastError = error[0];
-            if (!TextUtils.isEmpty(lastError)) {
-                DanmakuSpider.log("反射推送尝试 " + attempt + "/" + maxAttempts + " 失败: " + lastError);
-            }
-
-            if (attempt < maxAttempts) {
-                try {
-                    Thread.sleep(350L * attempt);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    lastError = "等待反射重试被中断";
-                    break;
-                }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            task.run();
+        } else {
+            activity.runOnUiThread(task);
+            try {
+                latch.await(3, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                error[0] = "等待主线程反射推送被中断";
             }
         }
 
+        if (success[0]) return true;
+
+        String lastError = error[0];
         if (!TextUtils.isEmpty(lastError)) {
             DanmakuSpider.log("反射推送失败: " + lastError);
         }
@@ -1448,15 +1518,83 @@ public class LeoDanmakuService {
     public static boolean canPushDanmakuByReflection(Activity activity) {
         if (activity == null || activity.isFinishing()) return false;
         try {
-            Class<?> danmakuClass = resolveHostDanmakuClass(activity);
-            if (danmakuClass == null) return false;
-            Object player = resolveFongMiPlayer(activity, danmakuClass);
-            if (player == null) return false;
-            Method method = findDanmakuMethod(player.getClass(), danmakuClass);
-            return method != null;
+            return resolveReflectionBinding(activity) != null;
         } catch (Throwable ignored) {
             return false;
         }
+    }
+
+    private static ReflectionBinding resolveReflectionBinding(Activity activity) {
+        if (activity == null || activity.isFinishing()) return null;
+        ReflectionBinding cached = getCachedReflectionBinding(activity);
+        if (cached != null) {
+            return cached;
+        }
+
+        String cacheKey = buildReflectionCacheKey(activity);
+        long now = System.currentTimeMillis();
+        if (cacheKey.equals(lastReflectionResolveFailureKey)
+                && now - lastReflectionResolveFailureAtMs < REFLECTION_RESOLVE_FAILURE_COOLDOWN_MS) {
+            return null;
+        }
+
+        try {
+            Class<?> danmakuClass = resolveHostDanmakuClass(activity);
+            if (danmakuClass == null) {
+                markReflectionResolveFailure(cacheKey, "未找到宿主Danmaku类");
+                return null;
+            }
+            Object player = resolveFongMiPlayer(activity, danmakuClass);
+            if (player == null) {
+                markReflectionResolveFailure(cacheKey, "未找到宿主播放器实例");
+                return null;
+            }
+            Method setDanmakuMethod = findDanmakuMethod(player.getClass(), danmakuClass);
+            if (setDanmakuMethod == null) {
+                markReflectionResolveFailure(cacheKey, "宿主目标缺少setDanmaku/o方法: " + player.getClass().getName());
+                return null;
+            }
+            setDanmakuMethod.setAccessible(true);
+            ReflectionBinding binding = new ReflectionBinding(cacheKey, player, danmakuClass, setDanmakuMethod, now);
+            reflectionBindingCache = binding;
+            lastReflectionResolveFailureAtMs = 0;
+            lastReflectionResolveFailureKey = "";
+            lastReflectionResolveFailureReason = "";
+            return binding;
+        } catch (Throwable e) {
+            markReflectionResolveFailure(cacheKey, e.getClass().getSimpleName() + ": " + e.getMessage());
+            return null;
+        }
+    }
+
+    private static ReflectionBinding getCachedReflectionBinding(Activity activity) {
+        ReflectionBinding binding = reflectionBindingCache;
+        if (binding == null || activity == null) return null;
+        if (!buildReflectionCacheKey(activity).equals(binding.cacheKey)) return null;
+        if (binding.danmakuClass == null || binding.setDanmakuMethod == null) return null;
+        Object player = binding.playerRef != null ? binding.playerRef.get() : null;
+        if (player == null) return null;
+        if (!binding.setDanmakuMethod.getDeclaringClass().isAssignableFrom(player.getClass())) return null;
+        return binding;
+    }
+
+    private static void clearReflectionBindingCache() {
+        reflectionBindingCache = null;
+    }
+
+    private static void markReflectionResolveFailure(String cacheKey, String reason) {
+        clearReflectionBindingCache();
+        lastReflectionResolveFailureKey = cacheKey == null ? "" : cacheKey;
+        lastReflectionResolveFailureAtMs = System.currentTimeMillis();
+        lastReflectionResolveFailureReason = reason == null ? "" : reason;
+    }
+
+    private static String buildReflectionCacheKey(Activity activity) {
+        if (activity == null) return "";
+        String packageName = "";
+        Package pkg = activity.getClass().getPackage();
+        if (pkg != null && pkg.getName() != null) packageName = pkg.getName();
+        return activity.getClass().getName() + "#" + packageName;
     }
 
     private static Object tryResolveKnownHostControllerTarget(Activity activity, Class<?> danmakuClass) {

@@ -59,18 +59,38 @@ public class DanmakuScanner {
         String title;
         String videoSignature;
         long scheduleTime;
+        AutoPushSession autoPushSession;
 
-        PendingPush(DanmakuItem danmakuItem, Activity activity, String title, String videoSignature, long scheduleTime) {
+        PendingPush(DanmakuItem danmakuItem, Activity activity, String title, String videoSignature, long scheduleTime,
+                    AutoPushSession autoPushSession) {
             this.danmakuItem = danmakuItem;
             this.activity = activity;
             this.title = title;
             this.videoSignature = videoSignature;
             this.scheduleTime = scheduleTime;
+            this.autoPushSession = autoPushSession;
+        }
+    }
+
+    private static class AutoPushSession {
+        EpisodeInfo episodeInfo;
+        String videoSignature;
+        String title;
+        Set<String> attemptedUrls = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+        Set<String> validatingUrls = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+        volatile boolean remoteCandidatesLoaded = false;
+        volatile boolean finished = false;
+
+        AutoPushSession(EpisodeInfo episodeInfo, String videoSignature, String title) {
+            this.episodeInfo = episodeInfo;
+            this.videoSignature = videoSignature;
+            this.title = title;
         }
     }
 
     private static final Map<String, PendingPush> pendingPushes = new ConcurrentHashMap<>();
     private static final Map<String, Long> lastPushTime = new ConcurrentHashMap<>();
+    private static final Map<String, AutoPushSession> autoPushSessions = new ConcurrentHashMap<>();
 
     private static boolean isFirstDetection = true;
 
@@ -173,6 +193,7 @@ public class DanmakuScanner {
                                     // 清空缓存和队列
                                     pendingPushes.clear();
                                     lastPushTime.clear();
+                                    autoPushSessions.clear();
                                     videoPlayStartTime = 0;
                                 }
 
@@ -555,6 +576,7 @@ public class DanmakuScanner {
                 // 清空缓存和队列
                 pendingPushes.clear();
                 lastPushTime.clear();
+                autoPushSessions.clear();
             }
         } catch (Exception e) {
             // 忽略检查错误，假设视频在播放
@@ -611,6 +633,7 @@ public class DanmakuScanner {
         isVideoPlaying = false;
         videoPlayStartTime = 0;
         isLeoButtonInjected = false;
+        autoPushSessions.clear();
     }
 
     // 检查并执行待推送任务
@@ -703,9 +726,10 @@ public class DanmakuScanner {
                         return;
                     }
                     LeoDanmakuService.pushDanmakuDirect(push.danmakuItem, push.activity, true);
-
-                    // 记录推送时间，防止重复推送
                     lastPushTime.put(push.danmakuItem.getDanmakuUrl(), System.currentTimeMillis());
+                    if (push.autoPushSession != null) {
+                        verifyAutoPushAsync(push.danmakuItem, push.activity, push.autoPushSession);
+                    }
                 } catch (Exception e) {
                     DanmakuSpider.log("❌ 推送失败: " + e.getMessage());
                 }
@@ -763,6 +787,7 @@ public class DanmakuScanner {
         // 清空缓存和队列
         pendingPushes.clear();
         lastPushTime.clear();
+        autoPushSessions.clear();
         isLeoButtonInjected = false;
     }
 
@@ -796,6 +821,7 @@ public class DanmakuScanner {
         if (!isSameVideo) {
             // 不同的视频
             pendingPushes.clear();
+            autoPushSessions.clear();
             DanmakuManager.currentVideoSignature = newSignature;
             DanmakuManager.lastVideoDetectedTime = System.currentTimeMillis();
 
@@ -1704,7 +1730,6 @@ public class DanmakuScanner {
 
         DanmakuSpider.log("⚡ 同系列缓存命中，先推送后异步校验: " + cachedItem.toString());
         scheduleAutoPush(cachedItem, activity, episodeInfo);
-        verifyCachedPushAsync(cachedItem, activity, episodeInfo, generateSignature(episodeInfo));
         return true;
     }
 
@@ -1722,7 +1747,7 @@ public class DanmakuScanner {
         int bestScore = -1;
 
         for (DanmakuItem item : DanmakuManager.getSeriesCacheSnapshot()) {
-            if (!isCachedItemValidForEpisode(item, episodeInfo, targetEpisodeNum, "缓存扫描", lastItem)) continue;
+            if (!isEpisodeCandidateValid(item, episodeInfo, targetEpisodeNum, "缓存扫描", lastItem, true, null)) continue;
 
             int score = 0;
             if (lastItem != null && DanmakuManager.hasDanmakuSource(lastItem)
@@ -1754,15 +1779,27 @@ public class DanmakuScanner {
     }
 
     private static boolean isCachedItemValidForEpisode(DanmakuItem item, EpisodeInfo episodeInfo, String targetEpisodeNum, String source, DanmakuItem lastItem) {
+        return isEpisodeCandidateValid(item, episodeInfo, targetEpisodeNum, source, lastItem, true, null);
+    }
+
+    private static boolean isEpisodeCandidateValid(DanmakuItem item, EpisodeInfo episodeInfo, String targetEpisodeNum,
+                                                   String source, DanmakuItem lastItem, boolean requireSameSource,
+                                                   Set<String> excludedUrls) {
         if (item == null || item.getEpId() == null || TextUtils.isEmpty(item.getApiBase())) return false;
         boolean logReject = !"缓存扫描".equals(source);
+        String itemUrl = item.getDanmakuUrl();
+
+        if (excludedUrls != null && !TextUtils.isEmpty(itemUrl) && excludedUrls.contains(itemUrl)) {
+            if (logReject) DanmakuSpider.log("🧪 候选拒绝(" + source + "): 已尝试过该URL - " + itemUrl);
+            return false;
+        }
 
         if (!isCachedItemSameSeries(item, episodeInfo)) {
             if (logReject) DanmakuSpider.log("🧪 缓存候选拒绝(" + source + "): 剧名不匹配 - " + item.toString());
             return false;
         }
 
-        if (lastItem != null && DanmakuManager.hasDanmakuSource(lastItem)
+        if (requireSameSource && lastItem != null && DanmakuManager.hasDanmakuSource(lastItem)
                 && !DanmakuManager.isSameDanmakuSource(item, lastItem)) {
             if (logReject) {
                 DanmakuSpider.log("🧪 缓存候选拒绝(" + source + "): 来源不一致，上一集="
@@ -1880,32 +1917,142 @@ public class DanmakuScanner {
         }
     }
 
-    private static void verifyCachedPushAsync(final DanmakuItem item, final Activity activity, final EpisodeInfo episodeInfo, final String signature) {
+    private static EpisodeInfo copyEpisodeInfo(EpisodeInfo source) {
+        if (source == null) return null;
+        EpisodeInfo copy = new EpisodeInfo();
+        List<String> names = new ArrayList<>();
+        if (source.getEpisodeNames() != null) names.addAll(source.getEpisodeNames());
+        copy.setEpisodeNames(names);
+        copy.setEpisodeNum(source.getEpisodeNum());
+        copy.setEpisodeYear(source.getEpisodeYear());
+        copy.setEpisodeSeasonNum(source.getEpisodeSeasonNum());
+        copy.setEpisodeDateCode(source.getEpisodeDateCode());
+        copy.setEpisodePartSuffix(source.getEpisodePartSuffix());
+        copy.setSeriesName(source.getSeriesName());
+        copy.setFileName(source.getFileName());
+        copy.setEpisodeUrl(source.getEpisodeUrl());
+        return copy;
+    }
+
+    private static AutoPushSession getOrCreateAutoPushSession(EpisodeInfo episodeInfo, String signature) {
+        AutoPushSession session = autoPushSessions.get(signature);
+        if (session != null && !session.finished) return session;
+        AutoPushSession newSession = new AutoPushSession(copyEpisodeInfo(episodeInfo), signature,
+                episodeInfo != null ? episodeInfo.getFileName() : "");
+        autoPushSessions.put(signature, newSession);
+        return newSession;
+    }
+
+    private static void finishAutoPushSession(AutoPushSession session) {
+        if (session == null) return;
+        session.finished = true;
+        if (!TextUtils.isEmpty(session.videoSignature)) {
+            autoPushSessions.remove(session.videoSignature, session);
+        }
+    }
+
+    private static boolean isAutoPushSessionCurrent(AutoPushSession session) {
+        return session != null
+                && !session.finished
+                && isCurrentActiveInstance()
+                && isSameVideo(DanmakuManager.currentVideoSignature, session.videoSignature);
+    }
+
+    private static DanmakuItem findNextRelatedDanmakuCandidate(EpisodeInfo episodeInfo, AutoPushSession session, DanmakuItem failedItem) {
+        if (episodeInfo == null || session == null) return null;
+        String targetEpisodeNum = episodeInfo.getEpisodeNum();
+        if (TextUtils.isEmpty(targetEpisodeNum)) return null;
+
+        DanmakuItem lastItem = DanmakuManager.getLastDanmakuItem();
+        DanmakuItem best = null;
+        int bestScore = Integer.MIN_VALUE;
+
+        for (DanmakuItem item : DanmakuManager.getSeriesCacheSnapshot()) {
+            if (!isEpisodeCandidateValid(item, episodeInfo, targetEpisodeNum, "异步校验回退",
+                    lastItem, false, session.attemptedUrls)) {
+                continue;
+            }
+
+            int score = 0;
+            if (failedItem != null) {
+                if (!TextUtils.isEmpty(failedItem.getApiBase()) && failedItem.getApiBase().equals(item.getApiBase())) score -= 20;
+                if (DanmakuManager.hasDanmakuSource(failedItem) && DanmakuManager.isSameDanmakuSource(item, failedItem)) score += 15;
+            }
+            if (lastItem != null && DanmakuManager.hasDanmakuSource(lastItem)
+                    && DanmakuManager.isSameDanmakuSource(item, lastItem)) {
+                score += 10;
+            }
+            if (!TextUtils.isEmpty(item.getApiSourceName())) score += 5;
+            if (!TextUtils.isEmpty(item.getAnimeTitle())) score += 2;
+            if (!TextUtils.isEmpty(item.getEpTitle())) score += 1;
+
+            if (best == null || score > bestScore) {
+                best = item;
+                bestScore = score;
+            }
+        }
+
+        return best;
+    }
+
+    private static void loadRemoteCandidatesForSession(AutoPushSession session, Activity activity) {
+        if (session == null || session.episodeInfo == null) return;
+        try {
+            List<DanmakuItem> remoteItems = LeoDanmakuService.searchDanmaku(copyEpisodeInfo(session.episodeInfo), activity, true);
+            if (remoteItems != null && !remoteItems.isEmpty()) {
+                DanmakuManager.cacheDanmakuItems(remoteItems);
+                DanmakuSpider.log("📡 异步补充全源候选完成，共" + remoteItems.size() + "条");
+            } else {
+                DanmakuSpider.log("📡 异步补充全源候选为空");
+            }
+        } catch (Exception e) {
+            DanmakuSpider.log("⚠️ 异步补充全源候选异常: " + e.getMessage());
+        }
+    }
+
+    private static void verifyAutoPushAsync(final DanmakuItem item, final Activity activity, final AutoPushSession session) {
+        if (item == null || session == null) return;
+        final String url = item.getDanmakuUrl();
+        if (TextUtils.isEmpty(url)) return;
+        if (!session.validatingUrls.add(url)) return;
+
         new Thread(new Runnable() {
             @Override
             public void run() {
                 try {
-                    if (!isCurrentActiveInstance()) {
-                        DanmakuSpider.log("⏭️ 缓存校验线程检测到新实例接管，跳过旧任务");
-                        return;
-                    }
+                    if (!isAutoPushSessionCurrent(session)) return;
+
                     int count = LeoDanmakuService.validateDanmakuItem(item, 15000);
                     if (count > 0) {
-                        DanmakuSpider.log("✅ 同系列缓存异步校验通过，共" + count + "条: " + item.getDanmakuUrl());
+                        DanmakuSpider.log("✅ 自动推送异步校验通过，共" + count + "条: " + url);
+                        finishAutoPushSession(session);
                         return;
                     }
 
-                    DanmakuSpider.log("⚠️ 同系列缓存异步校验失败，准备兜底搜索: " + item.getDanmakuUrl());
-                    if (isCurrentActiveInstance() && isSameVideo(DanmakuManager.currentVideoSignature, signature)) {
-                        iterativeAutoSearch(episodeInfo, activity);
+                    DanmakuSpider.log("⚠️ 自动推送异步校验失败，准备切换其他候选源: " + url);
+                    if (!isAutoPushSessionCurrent(session)) {
+                        DanmakuSpider.log("校验返回时视频已切换，终止自动回退");
+                        return;
+                    }
+
+                    DanmakuItem nextItem = findNextRelatedDanmakuCandidate(session.episodeInfo, session, item);
+                    if (nextItem == null && !session.remoteCandidatesLoaded) {
+                        session.remoteCandidatesLoaded = true;
+                        loadRemoteCandidatesForSession(session, activity);
+                        nextItem = findNextRelatedDanmakuCandidate(session.episodeInfo, session, item);
+                    }
+
+                    if (nextItem != null) {
+                        DanmakuSpider.log("🔁 自动切换到下一个候选源: " + nextItem.toString());
+                        scheduleAutoPush(nextItem, activity, session.episodeInfo, session);
                     } else {
-                        DanmakuSpider.log("缓存校验返回时视频已切换，跳过兜底搜索");
+                        DanmakuSpider.log("🤷‍♂️ 已穷尽当前剧集的相关弹幕源，未找到有效弹幕");
+                        finishAutoPushSession(session);
                     }
                 } catch (Exception e) {
-                    DanmakuSpider.log("⚠️ 同系列缓存异步校验异常: " + e.getMessage());
-                    if (isCurrentActiveInstance() && isSameVideo(DanmakuManager.currentVideoSignature, signature)) {
-                        iterativeAutoSearch(episodeInfo, activity);
-                    }
+                    DanmakuSpider.log("⚠️ 自动推送异步校验异常: " + e.getMessage());
+                } finally {
+                    session.validatingUrls.remove(url);
                 }
             }
         }).start();
@@ -1950,7 +2097,8 @@ public class DanmakuScanner {
     }
 
     // 安排延迟推送
-    private static void scheduleDelayedPush(DanmakuItem item, Activity activity, String title, String pushKey) {
+    private static void scheduleDelayedPush(DanmakuItem item, Activity activity, String title, String pushKey,
+                                            AutoPushSession autoPushSession) {
         if (!isCurrentActiveInstance()) {
             DanmakuSpider.log("⏭️ 旧实例自动匹配结果已失效，跳过延迟推送");
             return;
@@ -1965,7 +2113,7 @@ public class DanmakuScanner {
             return;
         }
         String signature = extractSignatureFromPushKey(pushKey);
-        PendingPush pendingPush = new PendingPush(item, activity, title, signature, System.currentTimeMillis());
+        PendingPush pendingPush = new PendingPush(item, activity, title, signature, System.currentTimeMillis(), autoPushSession);
         if (executeIfReadyToPush(pendingPush, pushKey)) {
             return;
         }
@@ -2019,6 +2167,12 @@ public class DanmakuScanner {
     }
 
     private static void scheduleAutoPush(DanmakuItem item, Activity activity, EpisodeInfo episodeInfo) {
+        String signature = episodeInfo != null ? generateSignature(episodeInfo) : "";
+        AutoPushSession session = getOrCreateAutoPushSession(episodeInfo, signature);
+        scheduleAutoPush(item, activity, episodeInfo, session);
+    }
+
+    private static void scheduleAutoPush(DanmakuItem item, Activity activity, EpisodeInfo episodeInfo, AutoPushSession session) {
         if (!isCurrentActiveInstance()) {
             DanmakuSpider.log("⚠️ 自动匹配结果来自旧实例，跳过延迟推送");
             return;
@@ -2028,11 +2182,23 @@ public class DanmakuScanner {
             DanmakuSpider.log("⚠️ 自动匹配结果已过期，跳过延迟推送");
             return;
         }
+        if (session == null) {
+            session = getOrCreateAutoPushSession(episodeInfo, signature);
+        }
+        if (!isAutoPushSessionCurrent(session)) {
+            DanmakuSpider.log("⚠️ 自动推送会话已失效，跳过: " + signature);
+            return;
+        }
         String url = item != null ? item.getDanmakuUrl() : "";
+        if (!TextUtils.isEmpty(url) && !session.attemptedUrls.add(url)) {
+            DanmakuSpider.log("⚠️ 当前候选源已尝试过，跳过重复推送: " + url);
+            return;
+        }
         String pushKey = (TextUtils.isEmpty(signature) ? "unknown" : signature) + "#" + url;
 
         if (activity != null && !activity.isFinishing() && LeoDanmakuService.canPushDanmakuByReflection(activity)) {
             DanmakuSpider.log("⚡ 宿主支持反射推送，跳过播放等待，立即执行: " + pushKey);
+            final AutoPushSession finalSession = session;
             new Thread(new Runnable() {
                 @Override
                 public void run() {
@@ -2041,16 +2207,17 @@ public class DanmakuScanner {
                         if (item != null && !TextUtils.isEmpty(item.getDanmakuUrl())) {
                             lastPushTime.put(item.getDanmakuUrl(), System.currentTimeMillis());
                         }
+                        verifyAutoPushAsync(item, activity, finalSession);
                     } catch (Exception e) {
                         DanmakuSpider.log("⚠️ 立即反射推送失败，回退等待播放: " + e.getMessage());
-                        scheduleDelayedPush(item, activity, episodeInfo != null ? episodeInfo.getFileName() : "", pushKey);
+                        scheduleDelayedPush(item, activity, episodeInfo != null ? episodeInfo.getFileName() : "", pushKey, finalSession);
                     }
                 }
             }).start();
             return;
         }
 
-        scheduleDelayedPush(item, activity, episodeInfo != null ? episodeInfo.getFileName() : "", pushKey);
+        scheduleDelayedPush(item, activity, episodeInfo != null ? episodeInfo.getFileName() : "", pushKey, session);
     }
 
     // === 修改后的按钮注入逻辑 ===
