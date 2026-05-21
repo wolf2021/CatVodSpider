@@ -2504,8 +2504,8 @@ public class DanmakuScanner {
             optionsList.add("📝 查看日志");
 
             String proxyTypeName = ProxyManager.getProxyTypeName();
-            String proxyStatus = ProxyManager.isProxyRunning() ? "运行中" : "已停止";
-            String proxyHealth = ProxyManager.isProxyHealthy() ? "健康" : "异常";
+            String proxyStatus = ProxyManager.getProxyStatusText();
+            String proxyHealth = ProxyManager.isProxyRunning() && ProxyManager.isProxyHealthy() ? "健康" : ProxyManager.isSwitching() ? "" : "异常";
             String proxyStatusText = ProxyManager.isProxyRunning() ?
                     proxyTypeName + " | " + proxyStatus + " | " + proxyHealth :
                     proxyTypeName + " | " + proxyStatus;
@@ -2583,24 +2583,28 @@ public class DanmakuScanner {
                             break;
 
                         case 8: // 代理状态
-                            String pTypeName = ProxyManager.getProxyTypeName();
-                            String pStatus = ProxyManager.isProxyRunning() ? "运行中" : "已停止";
-                            String pHealth = ProxyManager.isProxyHealthy() ? "健康" : "异常";
-                            String toastMsg = ProxyManager.isProxyRunning() ?
-                                    "代理类型: " + pTypeName + "\n状态: " + pStatus + "\n健康检查: " + pHealth :
-                                    "代理类型: " + pTypeName + "\n状态: " + pStatus;
-                            Utils.safeShowToast(activity, toastMsg);
-                            DanmakuSpider.log("[菜单] 查看代理状态: " + toastMsg);
+                            String sPTypeName = ProxyManager.getProxyTypeName();
+                            String sPStatus = ProxyManager.getProxyStatusText();
+                            String sPHealth = ProxyManager.isProxyRunning() && ProxyManager.isProxyHealthy() ? "健康" : ProxyManager.isSwitching() ? "" : "异常";
+                            String sToastMsg = ProxyManager.isProxyRunning() ?
+                                    "代理类型: " + sPTypeName + "\n状态: " + sPStatus + "\n健康检查: " + sPHealth :
+                                    "代理类型: " + sPTypeName + "\n状态: " + sPStatus;
+                            Utils.safeShowToast(activity, sToastMsg);
+                            DanmakuSpider.log("[菜单] 查看代理状态: " + sToastMsg);
                             break;
 
                         case 9: // 切换代理
+                            if (ProxyManager.isSwitching()) {
+                                Utils.safeShowToast(activity, "代理切换中，请稍候...");
+                                break;
+                            }
                             DanmakuSpider.log("[菜单] 用户触发代理切换");
                             if (ProxyManager.getActiveProxyType() == ProxyManager.PROXY_TYPE_JAVA) {
                                 if (ProxyManager.canSwitchToGoProxy()) {
                                     ProxyManager.switchToGoProxy(activity.getApplicationContext());
                                     Utils.safeShowToast(activity, "切换到Go代理中，请稍候...");
                                 } else {
-                                    Utils.safeShowToast(activity, "Go代理不可用（无二进制文件）");
+                                    Utils.safeShowToast(activity, "Go代理不可用");
                                 }
                             } else {
                                 ProxyManager.switchToJavaProxy(activity.getApplicationContext());
@@ -2609,13 +2613,12 @@ public class DanmakuScanner {
                             break;
 
                         case 10: // 重启代理
-                            DanmakuSpider.log("[菜单] 用户触发代理重启");
-                            if (ProxyManager.getActiveProxyType() == ProxyManager.PROXY_TYPE_JAVA) {
-                                ProxyManager.switchToJavaProxy(activity.getApplicationContext());
-                            } else {
-                                GoProxyManager.isProxyRunning.set(false);
-                                GoProxyManager.startGoProxyOnce(activity.getApplicationContext());
+                            if (ProxyManager.isSwitching()) {
+                                Utils.safeShowToast(activity, "代理操作中，请稍候...");
+                                break;
                             }
+                            DanmakuSpider.log("[菜单] 用户触发代理重启");
+                            ProxyManager.restartProxy(activity.getApplicationContext());
                             Utils.safeShowToast(activity, "代理重启中，请稍候...");
                             break;
                     }

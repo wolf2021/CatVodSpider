@@ -44,15 +44,15 @@ public class Init {
 
         ProxyManager.initialize(context);
 
-//        // 删除弹幕缓存
-//        DanmakuSpider.clearCache(context);
-//
-//        // 初始化
-//        DanmakuSpider.doInitWork(context,"");
-//
-//        // 启动Hook监控
-//        DanmakuScanner.startHookMonitor();
-//        DanmakuSpider.log("Leo弹幕监控已启动");
+        // 删除弹幕缓存
+        DanmakuSpider.clearCache(context);
+
+        // 初始化
+        DanmakuSpider.doInitWork(context,"");
+
+        // 启动Hook监控
+        DanmakuScanner.startHookMonitor();
+        DanmakuSpider.log("Leo弹幕监控已启动");
     }
     public static void execute(Runnable runnable) {
         get().executor.execute(runnable);

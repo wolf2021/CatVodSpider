@@ -101,77 +101,72 @@ public class GoProxyManager {
     }
 
     static void startGoProxyOnce(Context context) {
-        execute(() -> {
-            synchronized (isProxyRunning) {
-                // 如果检查不健康，但状态仍是 running，则强制设置为 false
-                if (isProxyRunning.get()) {
-                    log("GoProxy 状态与健康检查不符，强制更新状态为未运行");
-                    isProxyRunning.set(false);
+        execute(() -> startGoProxyOnceSync(context));
+    }
+
+    static void startGoProxyOnceSync(Context context) {
+        synchronized (isProxyRunning) {
+            if (isProxyRunning.get()) {
+                log("GoProxy 状态与健康检查不符，强制更新状态为未运行");
+                isProxyRunning.set(false);
+            }
+
+            log("GoProxy 未运行，开始启动流程...");
+            try {
+                if (TextUtils.isEmpty(goProxyExecutableName)) {
+                    List<String> abs = Arrays.asList(Build.SUPPORTED_ABIS);
+                    goProxyExecutableName = abs.contains("arm64-v8a") ? "goProxy-arm64" : "goProxy-arm";
                 }
 
-                log("GoProxy 未运行，开始启动流程...");
-                try {
-                    if (TextUtils.isEmpty(goProxyExecutableName)) {
-                        List<String> abs = Arrays.asList(Build.SUPPORTED_ABIS);
-                        goProxyExecutableName = abs.contains("arm64-v8a") ? "goProxy-arm64" : "goProxy-arm";
-                    }
+                File file = new File(context.getCacheDir(), goProxyExecutableName);
 
-                    File file = new File(context.getCacheDir(), goProxyExecutableName);
+                Process exec = Runtime.getRuntime().exec("/system/bin/sh");
+                try (DataOutputStream dos = new DataOutputStream(exec.getOutputStream())) {
+                    if (!file.exists()) {
+                        if (!file.createNewFile()) throw new Exception("创建文件失败 " + file);
 
-                    Process exec = Runtime.getRuntime().exec("/system/bin/sh");
-                    try (DataOutputStream dos = new DataOutputStream(exec.getOutputStream())) {
-                        if (!file.exists()) {
-                            if (!file.createNewFile()) throw new Exception("创建文件失败 " + file);
-
-                            // 获取资源输入流
-                            InputStream is = Objects.requireNonNull(get().getClass().getClassLoader()).getResourceAsStream("assets/" + goProxyExecutableName);
-                            if (is == null) {
-                                throw new Exception("资源文件不存在: assets/" + goProxyExecutableName);
-                            }
-
-                            try (FileOutputStream fos = new FileOutputStream(file)) {
-                                byte[] buffer = new byte[8192];
-                                int read;
-                                while ((read = is.read(buffer)) != -1) fos.write(buffer, 0, read);
-                            }
-                            if (!file.setExecutable(true)) throw new Exception(goProxyExecutableName + " setExecutable is false");
-                            dos.writeBytes("chmod 777 " + file.getAbsolutePath() + "\n");
-                            dos.flush();
+                        InputStream is = Objects.requireNonNull(get().getClass().getClassLoader()).getResourceAsStream("assets/" + goProxyExecutableName);
+                        if (is == null) {
+                            throw new Exception("资源文件不存在: assets/" + goProxyExecutableName);
                         }
 
-                        log("启动 " + file);
-                        dos.writeBytes("kill $(ps -ef | grep '" + goProxyExecutableName + "' | grep -v grep | awk '{print $2}')\n");
-                        dos.flush();
-                        // 将输出重定向到日志文件以便收集
-                        File logFile = new File(context.getCacheDir(), "goproxy_output.log");
-                        dos.writeBytes("nohup " + file.getAbsolutePath() + " > " + logFile.getAbsolutePath() + " 2>&1 &\n");
-                        dos.flush();
-                        dos.writeBytes("exit\n");
+                        try (FileOutputStream fos = new FileOutputStream(file)) {
+                            byte[] buffer = new byte[8192];
+                            int read;
+                            while ((read = is.read(buffer)) != -1) fos.write(buffer, 0, read);
+                        }
+                        if (!file.setExecutable(true)) throw new Exception(goProxyExecutableName + " setExecutable is false");
+                        dos.writeBytes("chmod 777 " + file.getAbsolutePath() + "\n");
                         dos.flush();
                     }
 
-                    // 启动日志收集线程
-                    startLogCollector(context, file);
+                    log("启动 " + file);
+                    dos.writeBytes("kill $(ps -ef | grep '" + goProxyExecutableName + "' | grep -v grep | awk '{print $2}')\n");
+                    dos.flush();
+                    File logFile = new File(context.getCacheDir(), "goproxy_output.log");
+                    dos.writeBytes("nohup " + file.getAbsolutePath() + " > " + logFile.getAbsolutePath() + " 2>&1 &\n");
+                    dos.flush();
+                    dos.writeBytes("exit\n");
+                    dos.flush();
+                }
 
-                    Thread.sleep(3000); // 等待代理有足够的时间来启动
+                startLogCollector(context, file);
 
-                    if (isProxyHealthy()) {
-                        log("GoProxy 启动成功！");
-                        isProxyRunning.set(true);
-                        // **关键逻辑**: 只有在首次确认启动成功后，才启动健康检查来监控它
-                        startHealthCheck(context);
-                    } else {
-                        log("GoProxy 启动后健康检查失败，请检查日志。");
-                        isProxyRunning.set(false);
-                    }
+                Thread.sleep(3000);
 
-                } catch (Exception e) {
-                    // 如果在这里捕获到异常（如文件找不到、权限问题），健康检查将不会被启动
-                    log("启动 GoProxy 过程中发生严重异常，已停止后续操作: " + e.getMessage());
+                if (isProxyHealthy()) {
+                    log("GoProxy 启动成功！");
+                    isProxyRunning.set(true);
+                } else {
+                    log("GoProxy 启动后健康检查失败，请检查日志。");
                     isProxyRunning.set(false);
                 }
+
+            } catch (Exception e) {
+                log("启动 GoProxy 过程中发生严重异常: " + e.getMessage());
+                isProxyRunning.set(false);
             }
-        });
+        }
     }
 
     public static synchronized boolean isProxyHealthy() {

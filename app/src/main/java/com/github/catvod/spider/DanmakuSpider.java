@@ -40,7 +40,7 @@ public class DanmakuSpider extends Spider {
     @Override
     public void init(Context context, String extend) throws Exception {
         super.init(context, extend);
-//        doInitWork(context, extend);
+        doInitWork(context, extend);
     }
 
     public static void clearCache(Context context) {
@@ -231,8 +231,8 @@ public class DanmakuSpider extends Spider {
 
             // 代理状态按钮（始终显示）
             String proxyTypeName = ProxyManager.getProxyTypeName();
-            String proxyStatus = ProxyManager.isProxyRunning() ? "运行中" : "已停止";
-            String proxyHealth = ProxyManager.isProxyHealthy() ? "健康" : "异常";
+            String proxyStatus = ProxyManager.getProxyStatusText();
+            String proxyHealth = ProxyManager.isProxyRunning() && ProxyManager.isProxyHealthy() ? "健康" : ProxyManager.isSwitching() ? "" : "异常";
             String proxyStatusText = proxyTypeName + " | " +
                     (ProxyManager.isProxyRunning() ? proxyStatus + " | " + proxyHealth : proxyStatus);
             JSONObject proxyStatusVod = createVod("proxy_status", "代理状态", "",
@@ -324,6 +324,10 @@ public class DanmakuSpider extends Spider {
                                     Utils.safeShowToast(ctx, toastMsg);
                                     refreshCategoryContent(ctx);
                                 } else if (id.equals("proxy_switch")) {
+                                    if (ProxyManager.isSwitching()) {
+                                        Utils.safeShowToast(ctx, "代理切换中，请稍候...");
+                                        return;
+                                    }
                                     DanmakuSpider.log("用户触发代理切换");
                                     if (ProxyManager.getActiveProxyType() == ProxyManager.PROXY_TYPE_JAVA) {
                                         if (ProxyManager.canSwitchToGoProxy()) {
@@ -341,22 +345,21 @@ public class DanmakuSpider extends Spider {
                                         public void run() {
                                             refreshCategoryContent(ctx);
                                         }
-                                    }, 3000);
+                                    }, 5000);
                                 } else if (id.equals("proxy_restart")) {
-                                    DanmakuSpider.log("用户触发代理重启");
-                                    if (ProxyManager.getActiveProxyType() == ProxyManager.PROXY_TYPE_JAVA) {
-                                        ProxyManager.switchToJavaProxy(ctx.getApplicationContext());
-                                    } else {
-                                        GoProxyManager.isProxyRunning.set(false);
-                                        GoProxyManager.startGoProxyOnce(ctx.getApplicationContext());
+                                    if (ProxyManager.isSwitching()) {
+                                        Utils.safeShowToast(ctx, "代理操作中，请稍候...");
+                                        return;
                                     }
+                                    DanmakuSpider.log("用户触发代理重启");
+                                    ProxyManager.restartProxy(ctx.getApplicationContext());
                                     Utils.safeShowToast(ctx, "代理重启中，请稍候...");
                                     new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
                                         @Override
                                         public void run() {
                                             refreshCategoryContent(ctx);
                                         }
-                                    }, 3000);
+                                    }, 5000);
                                 }
                             } catch (Exception e) {
                                 DanmakuSpider.log("显示对话框失败: " + e.getMessage());
@@ -382,12 +385,13 @@ public class DanmakuSpider extends Spider {
                             id.equals("proxy_switch") ? "切换代理" :
                             id.equals("proxy_restart") ? "重启代理" : "Leo 弹幕设置");
             vod.put("vod_pic", "");
-            String proxyStatus = ProxyManager.isProxyRunning() ? "运行中" : "已停止";
-            String proxyHealth = ProxyManager.isProxyHealthy() ? "健康" : "异常";
+            String proxyStatus = ProxyManager.getProxyStatusText();
+            String proxyHealth = ProxyManager.isProxyRunning() && ProxyManager.isProxyHealthy() ? "健康" : ProxyManager.isSwitching() ? "" : "异常";
             String proxyTypeName = ProxyManager.getProxyTypeName();
             String proxyStatusText = proxyTypeName + " | " +
                     (ProxyManager.isProxyRunning() ? proxyStatus + " | " + proxyHealth : proxyStatus);
-            String switchLabel = ProxyManager.getActiveProxyType() == ProxyManager.PROXY_TYPE_JAVA ?
+            String switchLabel = ProxyManager.isSwitching() ? "切换中..." :
+                    ProxyManager.getActiveProxyType() == ProxyManager.PROXY_TYPE_JAVA ?
                     (ProxyManager.canSwitchToGoProxy() ? "切换到Go代理" : "Go代理不可用") :
                     "切换到Java代理";
             vod.put("vod_remarks", id.equals("auto_push") ?
@@ -433,8 +437,8 @@ public class DanmakuSpider extends Spider {
                     } else if ("danmaku_style".equals(item.getString("vod_id"))) {
                         item.put("vod_remarks", "当前：" + config.getDanmakuStyleDisplayName());
                     } else if ("proxy_status".equals(item.getString("vod_id"))) {
-                        String status = ProxyManager.isProxyRunning() ? "运行中" : "已停止";
-                        String health = ProxyManager.isProxyHealthy() ? "健康" : "异常";
+                        String status = ProxyManager.getProxyStatusText();
+                        String health = ProxyManager.isProxyRunning() && ProxyManager.isProxyHealthy() ? "健康" : ProxyManager.isSwitching() ? "" : "异常";
                         String typeName = ProxyManager.getProxyTypeName();
                         String statusText = typeName + " | " +
                                 (ProxyManager.isProxyRunning() ? status + " | " + health : status);
