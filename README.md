@@ -78,7 +78,8 @@
 ### 💡 功能模块
 - **弹幕系统**：基于 [ABC, @leiatai](https://github.com/leiatai) 分享的源码开发
   - 感谢 [LogVar](https://github.com/huangxd-/danmu_api) 提供的弹幕API 支持
-- **Go代理**：集成不夜分享的代理功能
+- **Go代理**：当前仓库集成 Go 代理产物，代理源码已独立拆分到单独仓库维护
+  - [GoProxyAndroid 仓库](https://github.com/Silent1566/GoProxyAndroid)
   - [不夜发布页](https://github.com/vodspider/release)
   - [CatSpider仓库](https://github.com/vodspider/catspider)
 
