@@ -187,8 +187,8 @@ public class DanmakuUIHelper {
                     EditText apiInput = new EditText(activity);
                     apiInput.setText(TextUtils.join("\n", config.getApiUrlEntries()));
                     apiInput.setHint("每行一个API地址，可用 | 设置别名\n例如: https://example.com/danmu|公益源");
-                    apiInput.setMinLines(4);
-                    apiInput.setMaxLines(7);
+                    apiInput.setMinLines(3);
+                    apiInput.setMaxLines(4);
                     apiInput.setBackgroundColor(BACKGROUND_WHITE);
                     apiInput.setTextColor(TEXT_PRIMARY);
                     apiInput.setTextSize(13);
@@ -249,7 +249,6 @@ public class DanmakuUIHelper {
                     btnLayout.setGravity(Gravity.CENTER);
 
                     Button saveBtn = createStyledButton(activity, "保存", PRIMARY_COLOR);
-                    Button clearBtn = createStyledButton(activity, "清空缓存", ACCENT_COLOR);
                     Button lpConfigBtn = createStyledButton(activity, "布局", ACCENT_COLOR);
                     Button cancelBtn = createStyledButtonWithBorder(activity, "取消", PRIMARY_COLOR);
 
@@ -258,12 +257,10 @@ public class DanmakuUIHelper {
                     btnParams.setMargins(dpToPx(activity, 6), 0, dpToPx(activity, 6), 0);
 
                     saveBtn.setLayoutParams(btnParams);
-                    clearBtn.setLayoutParams(btnParams);
                     lpConfigBtn.setLayoutParams(btnParams);
                     cancelBtn.setLayoutParams(btnParams);
 
                     btnLayout.addView(saveBtn);
-                    btnLayout.addView(clearBtn);
                     btnLayout.addView(lpConfigBtn);
                     btnLayout.addView(cancelBtn);
 
@@ -319,18 +316,6 @@ public class DanmakuUIHelper {
                         }
                     });
 
-                    clearBtn.setOnClickListener(new View.OnClickListener() {
-                        @Override
-                        public void onClick(View v) {
-                            try {
-                                DanmakuSpider.clearCache(activity);
-                                Utils.safeShowToast(activity, "缓存已清空");
-                            } catch (Exception e) {
-                                Utils.safeShowToast(activity, "清空失败");
-                            }
-                        }
-                    });
-
                     lpConfigBtn.setOnClickListener(new View.OnClickListener() {
                         @Override
                         public void onClick(View v) {
@@ -360,6 +345,300 @@ public class DanmakuUIHelper {
                 }
             }
         });
+    }
+
+    public static void showCacheManagerDialog(Context ctx) {
+        if (!(ctx instanceof Activity)) {
+            DanmakuSpider.log("错误：Context不是Activity");
+            return;
+        }
+        Activity activity = (Activity) ctx;
+        if (activity.isFinishing() || activity.isDestroyed()) {
+            DanmakuSpider.log("Activity已销毁或正在销毁，不显示缓存管理对话框");
+            return;
+        }
+
+        activity.runOnUiThread(() -> {
+            try {
+                if (activity.isFinishing() || activity.isDestroyed()) {
+                    DanmakuSpider.log("Activity已销毁，不显示缓存管理对话框");
+                    return;
+                }
+
+                AlertDialog.Builder builder = new AlertDialog.Builder(activity);
+                LinearLayout mainLayout = new LinearLayout(activity);
+                mainLayout.setOrientation(LinearLayout.VERTICAL);
+                mainLayout.setBackgroundColor(BACKGROUND_WHITE);
+                mainLayout.setPadding(dpToPx(activity, 20), dpToPx(activity, 18), dpToPx(activity, 20), dpToPx(activity, 18));
+
+                TextView title = new TextView(activity);
+                title.setText("缓存管理");
+                title.setTextSize(24);
+                title.setTextColor(PRIMARY_COLOR);
+                title.setGravity(Gravity.CENTER);
+                title.setTypeface(null, android.graphics.Typeface.BOLD);
+                title.setPadding(0, dpToPx(activity, 4), 0, dpToPx(activity, 8));
+                mainLayout.addView(title);
+
+                TextView summary = new TextView(activity);
+                summary.setTextSize(13);
+                summary.setTextColor(TEXT_SECONDARY);
+                summary.setPadding(0, 0, 0, dpToPx(activity, 12));
+                mainLayout.addView(summary);
+
+                ScrollView scrollView = new ScrollView(activity);
+                LinearLayout listLayout = new LinearLayout(activity);
+                listLayout.setOrientation(LinearLayout.VERTICAL);
+                scrollView.addView(listLayout);
+                mainLayout.addView(scrollView, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+
+                LinearLayout bottomLayout = new LinearLayout(activity);
+                bottomLayout.setOrientation(LinearLayout.HORIZONTAL);
+                bottomLayout.setGravity(Gravity.CENTER);
+                bottomLayout.setPadding(0, dpToPx(activity, 14), 0, 0);
+
+                Button refreshBtn = createStyledButton(activity, "刷新", TERTIARY_COLOR);
+                Button clearBtn = createStyledButton(activity, "全部清空", ACCENT_COLOR);
+                Button closeBtn = createStyledButtonWithBorder(activity, "关闭", PRIMARY_COLOR);
+
+                LinearLayout.LayoutParams bottomBtnParams = new LinearLayout.LayoutParams(0, dpToPx(activity, 44), 1);
+                bottomBtnParams.setMargins(dpToPx(activity, 6), 0, dpToPx(activity, 6), 0);
+                bottomLayout.addView(refreshBtn, bottomBtnParams);
+                bottomLayout.addView(clearBtn, bottomBtnParams);
+                bottomLayout.addView(closeBtn, new LinearLayout.LayoutParams(0, dpToPx(activity, 44), 1));
+                mainLayout.addView(bottomLayout);
+
+                AlertDialog dialog = builder.setView(mainLayout).create();
+
+                final Runnable[] refresh = new Runnable[1];
+                refresh[0] = new Runnable() {
+                    @Override
+                    public void run() {
+                        DanmakuSpider.CacheStats stats = DanmakuSpider.getCacheStats(activity);
+                        summary.setText(buildCacheSummary(stats));
+                        renderCacheSections(activity, listLayout, refresh[0]);
+                    }
+                };
+
+                refreshBtn.setOnClickListener(v -> refresh[0].run());
+                clearBtn.setOnClickListener(v -> {
+                    try {
+                        DanmakuSpider.clearCache(activity);
+                        Utils.safeShowToast(activity, "缓存已清空");
+                        refresh[0].run();
+                    } catch (Exception e) {
+                        Utils.safeShowToast(activity, "清空失败");
+                    }
+                });
+                closeBtn.setOnClickListener(v -> dialog.dismiss());
+
+                refresh[0].run();
+                safeShowDialog(activity, dialog);
+            } catch (Exception e) {
+                DanmakuSpider.log("显示缓存管理失败: " + e.getMessage());
+                e.printStackTrace();
+            }
+        });
+    }
+
+    private static String buildCacheSummary(DanmakuSpider.CacheStats stats) {
+        return "弹幕文件 " + stats.fileCount + " 个，"
+                + "占用 " + formatCacheSize(stats.totalBytes) + "；"
+                + "搜索关键词 " + stats.searchCacheCount + " 条；"
+                + "运行时缓存 " + DanmakuScanner.getRuntimeCacheCount() + " 条";
+    }
+
+    private static String formatCacheSize(long bytes) {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024 * 1024) return String.format(Locale.getDefault(), "%.2f KB", bytes / 1024f);
+        if (bytes < 1024L * 1024L * 1024L) return String.format(Locale.getDefault(), "%.2f MB", bytes / 1024f / 1024f);
+        return String.format(Locale.getDefault(), "%.2f GB", bytes / 1024f / 1024f / 1024f);
+    }
+
+    private static void renderCacheSections(Activity activity, LinearLayout container, Runnable refresh) {
+        container.removeAllViews();
+
+        DanmakuSpider.CacheStats stats = DanmakuSpider.getCacheStats(activity);
+        container.addView(createCacheInfoCard(activity, "缓存目录", stats.cachePath));
+
+        List<DanmakuSpider.FileCacheEntry> fileEntries = DanmakuSpider.getFileCacheEntries(activity);
+        container.addView(createCacheSectionHeader(activity,
+                "弹幕文件缓存",
+                fileEntries.isEmpty() ? "暂无缓存文件" : ("共 " + fileEntries.size() + " 个文件，" + formatCacheSize(stats.totalBytes)),
+                "清空本组",
+                v -> {
+                    DanmakuSpider.clearFileCache(activity);
+                    Utils.safeShowToast(activity, "弹幕文件缓存已清空");
+                    refresh.run();
+                }));
+        if (fileEntries.isEmpty()) {
+            container.addView(createCacheEmptyText(activity, "当前没有弹幕文件缓存"));
+        } else {
+            for (DanmakuSpider.FileCacheEntry entry : fileEntries) {
+                String subtitle = entry.relativePath + "\n" + formatCacheSize(entry.bytes);
+                container.addView(createCacheEntryView(activity, "文件", subtitle, "删除", v -> {
+                    DanmakuSpider.removeFileCacheEntry(activity, entry.relativePath);
+                    Utils.safeShowToast(activity, "已删除缓存文件");
+                    refresh.run();
+                }));
+            }
+        }
+
+        List<SharedPreferencesService.SearchCacheEntry> searchEntries = SharedPreferencesService.getSearchKeywordCacheEntries(activity);
+        container.addView(createCacheSectionHeader(activity,
+                "搜索关键词缓存",
+                searchEntries.isEmpty() ? "暂无搜索缓存" : ("共 " + searchEntries.size() + " 条"),
+                "清空本组",
+                v -> {
+                    SharedPreferencesService.clearSearchKeywordCache(activity);
+                    Utils.safeShowToast(activity, "搜索关键词缓存已清空");
+                    refresh.run();
+                }));
+        if (searchEntries.isEmpty()) {
+            container.addView(createCacheEmptyText(activity, "当前没有搜索关键词缓存"));
+        } else {
+            for (SharedPreferencesService.SearchCacheEntry entry : searchEntries) {
+                String subtitle = "原关键词: " + safeText(entry.initialKeyword)
+                        + "\n当前关键词: " + safeText(entry.manualKeyword);
+                container.addView(createCacheEntryView(activity, "搜索缓存", subtitle, "删除", v -> {
+                    SharedPreferencesService.removeSearchKeywordCache(activity, entry.rawKey);
+                    Utils.safeShowToast(activity, "已删除搜索缓存");
+                    refresh.run();
+                }));
+            }
+        }
+
+        List<String> runtimeKeys = DanmakuScanner.getRuntimeCacheKeys();
+        container.addView(createCacheSectionHeader(activity,
+                "运行时缓存",
+                runtimeKeys.isEmpty() ? "暂无运行时缓存" : ("共 " + runtimeKeys.size() + " 条"),
+                "清空本组",
+                v -> {
+                    DanmakuScanner.clearRuntimeCache();
+                    Utils.safeShowToast(activity, "运行时缓存已清空");
+                    refresh.run();
+                }));
+        if (runtimeKeys.isEmpty()) {
+            container.addView(createCacheEmptyText(activity, "当前没有运行时缓存"));
+        } else {
+            for (String key : runtimeKeys) {
+                container.addView(createCacheEntryView(activity, "运行时键", key, "删除", v -> {
+                    DanmakuScanner.removeRuntimeCacheKey(key);
+                    Utils.safeShowToast(activity, "已删除运行时缓存");
+                    refresh.run();
+                }));
+            }
+        }
+    }
+
+    private static View createCacheSectionHeader(Activity activity, String titleText, String summaryText, String actionText, View.OnClickListener action) {
+        LinearLayout wrapper = new LinearLayout(activity);
+        wrapper.setOrientation(LinearLayout.VERTICAL);
+        wrapper.setPadding(0, dpToPx(activity, 10), 0, dpToPx(activity, 6));
+
+        TextView title = new TextView(activity);
+        title.setText(titleText);
+        title.setTextSize(16);
+        title.setTextColor(PRIMARY_COLOR);
+        title.setTypeface(null, android.graphics.Typeface.BOLD);
+        wrapper.addView(title);
+
+        LinearLayout row = new LinearLayout(activity);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView summary = new TextView(activity);
+        summary.setText(summaryText);
+        summary.setTextSize(13);
+        summary.setTextColor(TEXT_SECONDARY);
+        LinearLayout.LayoutParams summaryParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        row.addView(summary, summaryParams);
+
+        Button actionBtn = createStyledButton(activity, actionText, ACCENT_COLOR);
+        row.addView(actionBtn, new LinearLayout.LayoutParams(dpToPx(activity, 92), dpToPx(activity, 38)));
+        actionBtn.setOnClickListener(action);
+
+        wrapper.addView(row);
+        return wrapper;
+    }
+
+    private static View createCacheEntryView(Activity activity, String titleText, String bodyText, String actionText, View.OnClickListener action) {
+        LinearLayout wrapper = new LinearLayout(activity);
+        wrapper.setOrientation(LinearLayout.HORIZONTAL);
+        wrapper.setGravity(Gravity.CENTER_VERTICAL);
+        wrapper.setBackgroundColor(0xFFF7F7F7);
+        wrapper.setPadding(dpToPx(activity, 12), dpToPx(activity, 12), dpToPx(activity, 12), dpToPx(activity, 12));
+
+        LinearLayout.LayoutParams wrapperParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        wrapperParams.setMargins(0, 0, 0, dpToPx(activity, 8));
+        wrapper.setLayoutParams(wrapperParams);
+
+        LinearLayout textWrap = new LinearLayout(activity);
+        textWrap.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams textParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+
+        TextView title = new TextView(activity);
+        title.setText(titleText);
+        title.setTextSize(14);
+        title.setTextColor(TEXT_PRIMARY);
+        title.setTypeface(null, android.graphics.Typeface.BOLD);
+        textWrap.addView(title);
+
+        TextView body = new TextView(activity);
+        body.setText(bodyText);
+        body.setTextSize(12);
+        body.setTextColor(TEXT_SECONDARY);
+        body.setPadding(0, dpToPx(activity, 4), 0, 0);
+        textWrap.addView(body);
+
+        wrapper.addView(textWrap, textParams);
+
+        Button actionBtn = createStyledButton(activity, actionText, ACCENT_COLOR);
+        wrapper.addView(actionBtn, new LinearLayout.LayoutParams(dpToPx(activity, 76), dpToPx(activity, 38)));
+        actionBtn.setOnClickListener(action);
+        return wrapper;
+    }
+
+    private static View createCacheInfoCard(Activity activity, String titleText, String bodyText) {
+        LinearLayout wrapper = new LinearLayout(activity);
+        wrapper.setOrientation(LinearLayout.VERTICAL);
+        wrapper.setBackgroundColor(0xFFF7F7F7);
+        wrapper.setPadding(dpToPx(activity, 12), dpToPx(activity, 12), dpToPx(activity, 12), dpToPx(activity, 12));
+
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.setMargins(0, 0, 0, dpToPx(activity, 10));
+        wrapper.setLayoutParams(params);
+
+        TextView title = new TextView(activity);
+        title.setText(titleText);
+        title.setTextSize(14);
+        title.setTextColor(TEXT_PRIMARY);
+        title.setTypeface(null, android.graphics.Typeface.BOLD);
+        wrapper.addView(title);
+
+        TextView body = new TextView(activity);
+        body.setText(bodyText);
+        body.setTextSize(12);
+        body.setTextColor(TEXT_SECONDARY);
+        body.setPadding(0, dpToPx(activity, 4), 0, 0);
+        wrapper.addView(body);
+        return wrapper;
+    }
+
+    private static TextView createCacheEmptyText(Activity activity, String text) {
+        TextView empty = new TextView(activity);
+        empty.setText(text);
+        empty.setTextSize(13);
+        empty.setTextColor(TEXT_TERTIARY);
+        empty.setPadding(0, 0, 0, dpToPx(activity, 10));
+        return empty;
+    }
+
+    private static String safeText(String value) {
+        return TextUtils.isEmpty(value) ? "空" : value;
     }
 
     public static void showApiSourceManagerDialog(Context ctx) {

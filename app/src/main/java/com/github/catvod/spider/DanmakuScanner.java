@@ -263,6 +263,45 @@ public class DanmakuScanner {
         activeInstanceToken = "";
     }
 
+    public static List<String> getRuntimeCacheKeys() {
+        List<String> keys = new ArrayList<>();
+        try {
+            android.content.SharedPreferences prefs = getRuntimePrefs();
+            if (prefs != null) keys.addAll(prefs.getAll().keySet());
+            Collections.sort(keys);
+        } catch (Exception e) {
+            DanmakuSpider.log("读取运行时缓存失败: " + e.getMessage());
+        }
+        return keys;
+    }
+
+    public static int getRuntimeCacheCount() {
+        return getRuntimeCacheKeys().size();
+    }
+
+    public static void removeRuntimeCacheKey(String key) {
+        if (TextUtils.isEmpty(key)) return;
+        try {
+            android.content.SharedPreferences prefs = getRuntimePrefs();
+            if (prefs != null) {
+                prefs.edit().remove(key).apply();
+                if (KEY_ACTIVE_INSTANCE_TOKEN.equals(key)) activeInstanceToken = "";
+            }
+        } catch (Exception e) {
+            DanmakuSpider.log("删除运行时缓存失败: " + e.getMessage());
+        }
+    }
+
+    public static void clearRuntimeCache() {
+        try {
+            android.content.SharedPreferences prefs = getRuntimePrefs();
+            if (prefs != null) prefs.edit().clear().apply();
+            activeInstanceToken = "";
+        } catch (Exception e) {
+            DanmakuSpider.log("清空运行时缓存失败: " + e.getMessage());
+        }
+    }
+
     private static EpisodeInfo getEpisodeInfo(Media media, Activity act) {
         // 提取剧集信息
         String mediaTitle = media != null ? media.getTitle() : "";
@@ -2196,27 +2235,6 @@ public class DanmakuScanner {
         }
         String pushKey = (TextUtils.isEmpty(signature) ? "unknown" : signature) + "#" + url;
 
-        if (activity != null && !activity.isFinishing() && LeoDanmakuService.canPushDanmakuByReflection(activity)) {
-            DanmakuSpider.log("⚡ 宿主支持反射推送，跳过播放等待，立即执行: " + pushKey);
-            final AutoPushSession finalSession = session;
-            new Thread(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        LeoDanmakuService.pushDanmakuDirect(item, activity, true);
-                        if (item != null && !TextUtils.isEmpty(item.getDanmakuUrl())) {
-                            lastPushTime.put(item.getDanmakuUrl(), System.currentTimeMillis());
-                        }
-                        verifyAutoPushAsync(item, activity, finalSession);
-                    } catch (Exception e) {
-                        DanmakuSpider.log("⚠️ 立即反射推送失败，回退等待播放: " + e.getMessage());
-                        scheduleDelayedPush(item, activity, episodeInfo != null ? episodeInfo.getFileName() : "", pushKey, finalSession);
-                    }
-                }
-            }).start();
-            return;
-        }
-
         scheduleDelayedPush(item, activity, episodeInfo != null ? episodeInfo.getFileName() : "", pushKey, session);
     }
 
@@ -2498,6 +2516,7 @@ public class DanmakuScanner {
             optionsList.add("🔄 Auto 推送开关");
             optionsList.add("🔇 静默模式");
             optionsList.add("💬 弹幕配置");
+            optionsList.add("🗂 缓存管理");
             optionsList.add("🎨 布局配置");
             optionsList.add("✨ 弹幕交互模式");
             optionsList.add("⏱ 弹幕时间偏移");
@@ -2565,24 +2584,28 @@ public class DanmakuScanner {
                             DanmakuSpider.log("[菜单] 打开弹幕设置");
                             DanmakuUIHelper.showConfigDialog(activity);
                             break;
-                        case 4: // 布局配置
+                        case 4: // 缓存管理
+                            DanmakuSpider.log("[菜单] 打开缓存管理");
+                            DanmakuUIHelper.showCacheManagerDialog(activity);
+                            break;
+                        case 5: // 布局配置
                             DanmakuSpider.log("[菜单] 打开布局配置");
                             DanmakuUIHelper.showLpConfigDialog(activity);
                             break;
-                        case 5: // 弹幕交互模式
+                        case 6: // 弹幕交互模式
                             DanmakuSpider.log("[菜单] 打开弹幕交互模式");
                             DanmakuUIHelper.showDanmakuStyleDialog(activity);
                             break;
-                        case 6: // 弹幕时间偏移
+                        case 7: // 弹幕时间偏移
                             DanmakuSpider.log("[菜单] 打开弹幕时间偏移");
                             DanmakuUIHelper.showDanmakuOffsetDialog(activity);
                             break;
-                        case 7: // 查看日志（统一日志查看器）
+                        case 8: // 查看日志（统一日志查看器）
                             DanmakuSpider.log("[菜单] 打开统一日志查看器");
                             DanmakuUIHelper.showUnifiedLogDialog(activity);
                             break;
 
-                        case 8: // 代理状态
+                        case 9: // 代理状态
                             String sPTypeName = ProxyManager.getProxyTypeName();
                             String sPStatus = ProxyManager.getProxyStatusText();
                             String sPHealth = ProxyManager.isProxyRunning() && ProxyManager.isProxyHealthy() ? "健康" : ProxyManager.isSwitching() ? "" : "异常";
@@ -2593,7 +2616,7 @@ public class DanmakuScanner {
                             DanmakuSpider.log("[菜单] 查看代理状态: " + sToastMsg);
                             break;
 
-                        case 9: // 切换代理
+                        case 10: // 切换代理
                             if (ProxyManager.isSwitching()) {
                                 Utils.safeShowToast(activity, "代理切换中，请稍候...");
                                 break;
@@ -2612,7 +2635,7 @@ public class DanmakuScanner {
                             }
                             break;
 
-                        case 10: // 重启代理
+                        case 11: // 重启代理
                             if (ProxyManager.isSwitching()) {
                                 Utils.safeShowToast(activity, "代理操作中，请稍候...");
                                 break;

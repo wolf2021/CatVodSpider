@@ -15,11 +15,16 @@ import org.json.JSONObject;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
+
+import com.github.catvod.spider.danmu.SharedPreferencesService;
 
 public class DanmakuSpider extends Spider {
 
@@ -48,11 +53,139 @@ public class DanmakuSpider extends Spider {
         if (cacheDir.exists()) {
             File[] files = cacheDir.listFiles();
             if (files != null) {
-                for (File f : files) f.delete();
+                for (File f : files) deleteRecursively(f);
             }
         }
+        SharedPreferencesService.clearSearchKeywordCache(context);
         DanmakuScanner.lastDetectedTitle = "";
         DanmakuSpider.resetAutoSearch();
+    }
+
+    public static CacheStats getCacheStats(Context context) {
+        File cacheDir = new File(context.getCacheDir(), "leo_danmaku_cache");
+        long fileBytes = 0L;
+        int fileCount = 0;
+        if (cacheDir.exists()) {
+            File[] files = cacheDir.listFiles();
+            if (files != null) {
+                for (File file : files) {
+                    fileCount += countFiles(file);
+                    fileBytes += countBytes(file);
+                }
+            }
+        }
+        int searchCacheCount = SharedPreferencesService.getSearchKeywordCacheCount(context);
+        return new CacheStats(cacheDir.getAbsolutePath(), fileCount, fileBytes, searchCacheCount);
+    }
+
+    public static List<FileCacheEntry> getFileCacheEntries(Context context) {
+        List<FileCacheEntry> entries = new ArrayList<>();
+        File cacheDir = new File(context.getCacheDir(), "leo_danmaku_cache");
+        if (!cacheDir.exists()) return entries;
+        collectFileEntries(cacheDir, cacheDir, entries);
+        Collections.sort(entries, new Comparator<FileCacheEntry>() {
+            @Override
+            public int compare(FileCacheEntry o1, FileCacheEntry o2) {
+                return o1.relativePath.compareToIgnoreCase(o2.relativePath);
+            }
+        });
+        return entries;
+    }
+
+    public static void clearFileCache(Context context) {
+        File cacheDir = new File(context.getCacheDir(), "leo_danmaku_cache");
+        if (cacheDir.exists()) {
+            File[] files = cacheDir.listFiles();
+            if (files != null) {
+                for (File f : files) deleteRecursively(f);
+            }
+        }
+    }
+
+    public static void removeFileCacheEntry(Context context, String relativePath) {
+        if (TextUtils.isEmpty(relativePath)) return;
+        File cacheDir = new File(context.getCacheDir(), "leo_danmaku_cache");
+        File target = new File(cacheDir, relativePath);
+        try {
+            String basePath = cacheDir.getCanonicalPath();
+            String targetPath = target.getCanonicalPath();
+            if (!targetPath.startsWith(basePath + File.separator) && !targetPath.equals(basePath)) {
+                log("拒绝删除缓存项，目标路径越界: " + relativePath);
+                return;
+            }
+            deleteRecursively(target);
+            log("已删除缓存文件: " + relativePath);
+        } catch (Exception e) {
+            log("删除缓存文件失败: " + relativePath + "，" + e.getMessage());
+        }
+    }
+
+    private static void collectFileEntries(File root, File current, List<FileCacheEntry> entries) {
+        if (current == null || !current.exists()) return;
+        if (current.isFile()) {
+            String relative = current.getAbsolutePath().substring(root.getAbsolutePath().length());
+            if (relative.startsWith(File.separator)) relative = relative.substring(1);
+            entries.add(new FileCacheEntry(relative, current.length()));
+            return;
+        }
+        File[] children = current.listFiles();
+        if (children == null) return;
+        for (File child : children) collectFileEntries(root, child, entries);
+    }
+
+    private static int countFiles(File file) {
+        if (file == null || !file.exists()) return 0;
+        if (file.isFile()) return 1;
+        File[] children = file.listFiles();
+        if (children == null) return 0;
+        int total = 0;
+        for (File child : children) total += countFiles(child);
+        return total;
+    }
+
+    private static long countBytes(File file) {
+        if (file == null || !file.exists()) return 0L;
+        if (file.isFile()) return file.length();
+        File[] children = file.listFiles();
+        if (children == null) return 0L;
+        long total = 0L;
+        for (File child : children) total += countBytes(child);
+        return total;
+    }
+
+    private static void deleteRecursively(File file) {
+        if (file == null || !file.exists()) return;
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) {
+                for (File child : children) deleteRecursively(child);
+            }
+        }
+        file.delete();
+    }
+
+    public static class CacheStats {
+        public final String cachePath;
+        public final int fileCount;
+        public final long totalBytes;
+        public final int searchCacheCount;
+
+        public CacheStats(String cachePath, int fileCount, long totalBytes, int searchCacheCount) {
+            this.cachePath = cachePath;
+            this.fileCount = fileCount;
+            this.totalBytes = totalBytes;
+            this.searchCacheCount = searchCacheCount;
+        }
+    }
+
+    public static class FileCacheEntry {
+        public final String relativePath;
+        public final long bytes;
+
+        public FileCacheEntry(String relativePath, long bytes) {
+            this.relativePath = relativePath;
+            this.bytes = bytes;
+        }
     }
 
     public static synchronized void doInitWork(Context context, String extend) {
@@ -220,6 +353,12 @@ public class DanmakuSpider extends Spider {
             JSONObject logVod = createVod("log", "查看日志", "", "弹幕/Go代理日志");
             list.put(logVod);
 
+            // 创建缓存管理按钮
+            CacheStats cacheStats = getCacheStats(Objects.requireNonNull(Utils.getTopActivity()));
+            JSONObject cacheVod = createVod("cache_manager", "缓存管理", "",
+                    "文件 " + cacheStats.fileCount + " | 搜索 " + cacheStats.searchCacheCount + " | 运行时 " + DanmakuScanner.getRuntimeCacheCount());
+            list.put(cacheVod);
+
             // 创建布局配置按钮
             JSONObject lpConfigVod = createVod("lp_config", "布局配置", "", "调整弹窗大小和透明度");
             list.put(lpConfigVod);
@@ -308,6 +447,8 @@ public class DanmakuSpider extends Spider {
                                     refreshCategoryContent(ctx);
                                 } else if (id.equals("log")) {
                                     DanmakuUIHelper.showUnifiedLogDialog(ctx);
+                                } else if (id.equals("cache_manager")) {
+                                    DanmakuUIHelper.showCacheManagerDialog(ctx);
                                 } else if (id.equals("danmaku_offset")) {
                                     DanmakuUIHelper.showDanmakuOffsetDialog(ctx);
                                 } else if (id.equals("lp_config")) {
@@ -379,7 +520,7 @@ public class DanmakuSpider extends Spider {
             vod.put("vod_name", id.equals("auto_push") ? "自动推送弹幕" :
                     id.equals("silent_mode") ? "静默模式" :
                     id.equals("danmaku_offset") ? "弹幕时间偏移" :
-                    id.equals("log") ? "查看日志" : id.equals("lp_config") ? "布局配置" :
+                    id.equals("log") ? "查看日志" : id.equals("cache_manager") ? "缓存管理" : id.equals("lp_config") ? "布局配置" :
                             id.equals("danmaku_style") ? "弹幕交互模式" :
                             id.equals("proxy_status") ? "代理状态" :
                             id.equals("proxy_switch") ? "切换代理" :
@@ -394,12 +535,15 @@ public class DanmakuSpider extends Spider {
                     ProxyManager.getActiveProxyType() == ProxyManager.PROXY_TYPE_JAVA ?
                     (ProxyManager.canSwitchToGoProxy() ? "切换到Go代理" : "Go代理不可用") :
                     "切换到Java代理";
+            CacheStats cacheStats = getCacheStats(Objects.requireNonNull(Utils.getTopActivity()));
             vod.put("vod_remarks", id.equals("auto_push") ?
                     (config.isAutoPushEnabled() ? "已开启" : "已关闭") :
                     id.equals("silent_mode") ?
                             (config.isSilentMode() ? "已开启" : "已关闭") :
                     id.equals("danmaku_offset") ? DanmakuUtils.formatOffsetLabel(config.getDanmakuTimeOffsetMs()) :
-                    id.equals("log") ? "弹幕/代理日志" : id.equals("lp_config") ? "调整弹窗大小和透明度" :
+                    id.equals("log") ? "弹幕/代理日志" :
+                            id.equals("cache_manager") ? ("文件 " + cacheStats.fileCount + " | 搜索 " + cacheStats.searchCacheCount + " | 运行时 " + DanmakuScanner.getRuntimeCacheCount()) :
+                            id.equals("lp_config") ? "调整弹窗大小和透明度" :
                             id.equals("danmaku_style") ? "当前：" + config.getDanmakuStyleDisplayName() :
                             id.equals("proxy_status") ? proxyStatusText :
                             id.equals("proxy_switch") ? "当前: " + proxyTypeName + " | " + switchLabel :
@@ -436,6 +580,9 @@ public class DanmakuSpider extends Spider {
                         item.put("vod_remarks", DanmakuUtils.formatOffsetLabel(config.getDanmakuTimeOffsetMs()));
                     } else if ("danmaku_style".equals(item.getString("vod_id"))) {
                         item.put("vod_remarks", "当前：" + config.getDanmakuStyleDisplayName());
+                    } else if ("cache_manager".equals(item.getString("vod_id"))) {
+                        CacheStats cacheStats = getCacheStats(ctx);
+                        item.put("vod_remarks", "文件 " + cacheStats.fileCount + " | 搜索 " + cacheStats.searchCacheCount + " | 运行时 " + DanmakuScanner.getRuntimeCacheCount());
                     } else if ("proxy_status".equals(item.getString("vod_id"))) {
                         String status = ProxyManager.getProxyStatusText();
                         String health = ProxyManager.isProxyRunning() && ProxyManager.isProxyHealthy() ? "健康" : ProxyManager.isSwitching() ? "" : "异常";
