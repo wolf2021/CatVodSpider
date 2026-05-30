@@ -404,6 +404,11 @@ public class DanmakuSpider extends Spider {
 
 
     @Override
+    public String action(String id) {
+        return detailContent(Collections.singletonList(id));
+    }
+
+    @Override
     public String detailContent(List<String> ids) {
         if (ids == null || ids.isEmpty()) return "";
         final String id = ids.get(0);
@@ -622,6 +627,7 @@ public class DanmakuSpider extends Spider {
         vod.put("vod_name", name);
         vod.put("vod_pic", pic);
         vod.put("vod_remarks", remark);
+        vod.put("action", id);
         return vod;
     }
 }

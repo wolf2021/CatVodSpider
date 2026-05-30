@@ -1324,7 +1324,7 @@ public class LeoDanmakuService {
                 DanmakuSpider.log("启用弹幕时间偏移: " + DanmakuUtils.formatOffsetLabel(offsetMs) + "，通过本地代理推送");
             }
             String pushResp = "";
-            boolean reflectionPushed = activity != null && tryPushDanmakuByReflection(danmakuItem, activity, refreshPath);
+            boolean reflectionPushed = false;
             if (reflectionPushed) {
                 pushResp = "OK";
                 DanmakuSpider.log("✅ 已通过反射方式推送弹幕: " + buildDanmakuDisplayName(danmakuItem));
