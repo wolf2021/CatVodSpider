@@ -1,0 +1,30 @@
+{
+  "spider": "../jar/danmu.jar",
+  "lives": [],
+  "sites": [
+    {
+      "key": "leo_danmaku",
+      "name": "LEO| 弹幕",
+      "type": 3,
+      "api": "csp_DanmakuSpider",
+      "searchable": 1,
+      "changeable": 0,
+      "index": 1,
+      "ext": {
+        "apiUrls": [
+          "https://danmu.iyo.us.ci/theft-dastardly-prognosis-hula-agenda2-dropkick|公益源",
+          "https://logo.saodu.work:8888/87654321|公益源1",
+          "https://dm.626258.xyz/87654321|公益源2"
+        ],
+        "autoPushEnabled": true,
+        "silentMode": true,
+        "danmakuStyle": "经典模式",
+        "proxyPort": 5575,
+        "lpAlpha": 0.9,
+        "lpWidth": 0.9,
+        "lpHeight": 0.85,
+        "titleMappingsUrl": "https://ghfast.top/https://raw.githubusercontent.com/goodcommunication/mydm/main/yins.json"
+      }
+    }
+  ]
+}

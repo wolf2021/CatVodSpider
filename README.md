@@ -56,6 +56,16 @@
    }
    ```
 
+### 📺 直播栏独立配置
+
+如果播放器需要在直播栏单独填写弹幕配置，可以使用 `json/dm.json`：
+
+```text
+https://ghfast.top/https://raw.githubusercontent.com/Silent1566/CatVodSpider/main/json/dm.json
+```
+
+该配置使用本项目的 `csp_DanmakuSpider` 和 `jar/danmu.jar`，默认内置三个公益弹幕源。
+
 ## ⚙️ 参数配置说明
 
 | 参数名 | 类型 | 默认值 | 说明                   |
