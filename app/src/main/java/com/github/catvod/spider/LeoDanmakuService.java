@@ -1179,7 +1179,7 @@ public class LeoDanmakuService {
 
     public static int validateDanmakuItem(DanmakuItem danmakuItem, int timeoutMs) {
         if (danmakuItem == null || danmakuItem.getEpId() == null || TextUtils.isEmpty(danmakuItem.getApiBase())) return -1;
-        String danmakuData = NetworkUtils.robustHttpGet(danmakuItem.getDanmakuUrl(), timeoutMs, 1, 0);
+        String danmakuData = DanmakuXmlCache.fetchRaw(danmakuItem.getDanmakuUrl(), timeoutMs, 1, 0);
         return countDanmakuItems(danmakuData);
     }
 
@@ -1262,7 +1262,7 @@ public class LeoDanmakuService {
             if (validateBeforePush) {
                 for (int attempt = 0; attempt < maxRetries; attempt++) {
                     try {
-                        danmakuData = NetworkUtils.robustHttpGet(danmakuItem.getDanmakuUrl(), 15000, 1, 0);
+                        danmakuData = DanmakuXmlCache.fetchRaw(danmakuItem.getDanmakuUrl(), 15000, 1, 0);
                         DanmakuSpider.log("获取弹幕数据 (尝试 " + (attempt + 1) + "/" + maxRetries + ") - URL: " + danmakuItem.getDanmakuUrl());
 
                         // 直接尝试解析，如果成功（返回-1代表解析异常，0代表无内容，大于0代表成功）
@@ -1384,7 +1384,6 @@ public class LeoDanmakuService {
 
     private static String buildDanmakuRefreshPath(DanmakuItem danmakuItem, String localIp, int offsetMs) throws Exception {
         String rawUrl = danmakuItem.getDanmakuUrl();
-        if (offsetMs == 0) return rawUrl;
         return "http://" + localIp + ":9810/danmaku?url=" +
                 URLEncoder.encode(rawUrl, "UTF-8") +
                 "&t=" + System.currentTimeMillis();
@@ -2578,18 +2577,7 @@ public class LeoDanmakuService {
 
     // 辅助方法：从XML中解析弹幕总数
     private static int countDanmakuItems(String xmlData) {
-        try {
-            if (TextUtils.isEmpty(xmlData) || !xmlData.trim().startsWith("<")) return 0;
-
-            javax.xml.parsers.DocumentBuilderFactory factory = javax.xml.parsers.DocumentBuilderFactory.newInstance();
-            javax.xml.parsers.DocumentBuilder builder = factory.newDocumentBuilder();
-            org.xml.sax.InputSource is = new org.xml.sax.InputSource(new java.io.StringReader(xmlData));
-            org.w3c.dom.Document doc = builder.parse(is);
-
-            return doc.getElementsByTagName("d").getLength();
-        } catch (Exception e) {
-            DanmakuSpider.log("解析弹幕数据异常: " + e.getMessage());
-            return -1; // 返回-1表示解析异常
-        }
+        if (TextUtils.isEmpty(xmlData) || !xmlData.trim().startsWith("<")) return 0;
+        return DanmakuUtils.countItems(xmlData);
     }
 }

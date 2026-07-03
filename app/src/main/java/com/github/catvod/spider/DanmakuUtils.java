@@ -2,23 +2,9 @@ package com.github.catvod.spider;
 
 import android.text.TextUtils;
 
-import org.w3c.dom.Document;
-import org.w3c.dom.Element;
-import org.w3c.dom.NodeList;
-import org.xml.sax.InputSource;
-
-import java.io.StringReader;
-import java.io.StringWriter;
 import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-
-import javax.xml.parsers.DocumentBuilderFactory;
-import javax.xml.transform.OutputKeys;
-import javax.xml.transform.Transformer;
-import javax.xml.transform.TransformerFactory;
-import javax.xml.transform.dom.DOMSource;
-import javax.xml.transform.stream.StreamResult;
 
 public class DanmakuUtils {
 
@@ -26,70 +12,124 @@ public class DanmakuUtils {
         if (offsetMs == 0 || TextUtils.isEmpty(xmlData)) return xmlData;
 
         try {
-            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-            disableExternalEntities(factory);
-            Document document = factory.newDocumentBuilder().parse(new InputSource(new StringReader(xmlData)));
-            NodeList nodes = document.getElementsByTagName("d");
             int shiftedCount = 0;
             double offsetSeconds = offsetMs / 1000.0;
+            StringBuilder output = new StringBuilder(xmlData.length() + 32);
+            int index = 0;
 
-            for (int i = 0; i < nodes.getLength(); i++) {
-                if (!(nodes.item(i) instanceof Element)) continue;
-                Element element = (Element) nodes.item(i);
-                String p = element.getAttribute("p");
-                if (TextUtils.isEmpty(p)) continue;
-
-                String[] parts = p.split(",", -1);
-                if (parts.length == 0 || TextUtils.isEmpty(parts[0])) continue;
-
-                try {
-                    double originalSeconds = Double.parseDouble(parts[0]);
-                    double shiftedSeconds = Math.max(0, originalSeconds + offsetSeconds);
-                    parts[0] = formatSeconds(shiftedSeconds);
-                    element.setAttribute("p", joinComma(parts));
-                    shiftedCount++;
-                } catch (NumberFormatException ignored) {
+            while (index < xmlData.length()) {
+                int tagStart = xmlData.indexOf("<d", index);
+                if (tagStart < 0) {
+                    output.append(xmlData, index, xmlData.length());
+                    break;
                 }
+
+                if (!isDanmakuTag(xmlData, tagStart)) {
+                    output.append(xmlData, index, tagStart + 2);
+                    index = tagStart + 2;
+                    continue;
+                }
+
+                int tagEnd = xmlData.indexOf('>', tagStart + 2);
+                if (tagEnd < 0) {
+                    output.append(xmlData, index, xmlData.length());
+                    break;
+                }
+
+                output.append(xmlData, index, tagStart);
+                ShiftResult result = shiftTagTime(xmlData, tagStart, tagEnd + 1, offsetSeconds);
+                if (result.changed) {
+                    shiftedCount++;
+                }
+                output.append(result.tag);
+                index = tagEnd + 1;
             }
 
             if (shiftedCount == 0) return xmlData;
-
-            Transformer transformer = TransformerFactory.newInstance().newTransformer();
-            transformer.setOutputProperty(OutputKeys.ENCODING, "UTF-8");
-            transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "no");
-            StringWriter writer = new StringWriter();
-            transformer.transform(new DOMSource(document), new StreamResult(writer));
             DanmakuSpider.log("⏱ 已应用弹幕时间偏移: " + formatOffsetLabel(offsetMs) + "，处理 " + shiftedCount + " 条");
-            return writer.toString();
+            return output.toString();
         } catch (Exception e) {
             DanmakuSpider.log("弹幕时间偏移处理失败，使用原始弹幕: " + e.getMessage());
             return xmlData;
         }
     }
 
-    private static void disableExternalEntities(DocumentBuilderFactory factory) {
-        try {
-            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-        } catch (Exception ignored) {
+    public static int countItems(String xmlData) {
+        if (TextUtils.isEmpty(xmlData)) return 0;
+        int count = 0;
+        int index = 0;
+        while (index < xmlData.length()) {
+            int tagStart = xmlData.indexOf("<d", index);
+            if (tagStart < 0) break;
+            if (isDanmakuTag(xmlData, tagStart)) count++;
+            index = tagStart + 2;
         }
-        try {
-            factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
-        } catch (Exception ignored) {
-        }
-        try {
-            factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
-        } catch (Exception ignored) {
-        }
-        factory.setExpandEntityReferences(false);
+        return count;
     }
 
-    private static String joinComma(String[] parts) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < parts.length; i++) {
-            if (i > 0) sb.append(',');
-            sb.append(parts[i]);
+    private static boolean isDanmakuTag(String text, int tagStart) {
+        int next = tagStart + 2;
+        if (next >= text.length()) return false;
+        char c = text.charAt(next);
+        return Character.isWhitespace(c) || c == '>' || c == '/';
+    }
+
+    private static ShiftResult shiftTagTime(String xmlData, int tagStart, int tagEnd, double offsetSeconds) {
+        int attrIndex = findPAttribute(xmlData, tagStart + 2, tagEnd);
+        if (attrIndex < 0) return new ShiftResult(xmlData.substring(tagStart, tagEnd), false);
+
+        int equalsIndex = attrIndex + 1;
+        while (equalsIndex < tagEnd && Character.isWhitespace(xmlData.charAt(equalsIndex))) equalsIndex++;
+        if (equalsIndex >= tagEnd || xmlData.charAt(equalsIndex) != '=') {
+            return new ShiftResult(xmlData.substring(tagStart, tagEnd), false);
         }
-        return sb.toString();
+
+        int quoteIndex = equalsIndex + 1;
+        while (quoteIndex < tagEnd && Character.isWhitespace(xmlData.charAt(quoteIndex))) quoteIndex++;
+        if (quoteIndex >= tagEnd) return new ShiftResult(xmlData.substring(tagStart, tagEnd), false);
+
+        char quote = xmlData.charAt(quoteIndex);
+        if (quote != '"' && quote != '\'') return new ShiftResult(xmlData.substring(tagStart, tagEnd), false);
+
+        int valueStart = quoteIndex + 1;
+        int valueEnd = xmlData.indexOf(quote, valueStart);
+        if (valueEnd < 0 || valueEnd > tagEnd) return new ShiftResult(xmlData.substring(tagStart, tagEnd), false);
+
+        int commaIndex = xmlData.indexOf(',', valueStart);
+        if (commaIndex < 0 || commaIndex > valueEnd) return new ShiftResult(xmlData.substring(tagStart, tagEnd), false);
+
+        try {
+            double originalSeconds = Double.parseDouble(xmlData.substring(valueStart, commaIndex));
+            String shiftedSeconds = formatSeconds(Math.max(0, originalSeconds + offsetSeconds));
+            StringBuilder tag = new StringBuilder(tagEnd - tagStart + shiftedSeconds.length());
+            tag.append(xmlData, tagStart, valueStart);
+            tag.append(shiftedSeconds);
+            tag.append(xmlData, commaIndex, tagEnd);
+            return new ShiftResult(tag.toString(), true);
+        } catch (NumberFormatException ignored) {
+            return new ShiftResult(xmlData.substring(tagStart, tagEnd), false);
+        }
+    }
+
+    private static int findPAttribute(String text, int start, int end) {
+        for (int i = start; i < end; i++) {
+            if (text.charAt(i) != 'p') continue;
+            if (i > start && !Character.isWhitespace(text.charAt(i - 1))) continue;
+            int next = i + 1;
+            while (next < end && Character.isWhitespace(text.charAt(next))) next++;
+            if (next < end && text.charAt(next) == '=') return i;
+        }
+        return -1;
+    }
+
+    private static class ShiftResult {
+        final String tag;
+        final boolean changed;
+
+        ShiftResult(String tag, boolean changed) {
+            this.tag = tag;
+            this.changed = changed;
+        }
     }
 
     private static String formatSeconds(double seconds) {
