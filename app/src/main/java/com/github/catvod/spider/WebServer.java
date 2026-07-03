@@ -88,7 +88,7 @@ public class WebServer extends NanoHTTPD {
             return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "Missing danmaku url.");
         }
 
-        String xml = NetworkUtils.robustHttpGet(danmakuUrl);
+        String xml = DanmakuXmlCache.fetchRaw(danmakuUrl, 30000, 2, 500);
         if (TextUtils.isEmpty(xml)) {
             return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Fetch danmaku failed.");
         }
@@ -99,7 +99,14 @@ public class WebServer extends NanoHTTPD {
         if (offsetMs != 0) {
             DanmakuSpider.log("本地弹幕代理收到请求，时间偏移: " + DanmakuUtils.formatOffsetLabel(offsetMs));
         }
-        String body = DanmakuUtils.applyTimeOffset(xml, offsetMs);
+        String body = xml;
+        if (offsetMs != 0) {
+            body = DanmakuXmlCache.getOffset(danmakuUrl, offsetMs);
+            if (TextUtils.isEmpty(body)) {
+                body = DanmakuUtils.applyTimeOffset(xml, offsetMs);
+                DanmakuXmlCache.putOffset(danmakuUrl, offsetMs, body);
+            }
+        }
         Response response = newFixedLengthResponse(Response.Status.OK, "application/xml; charset=utf-8", body);
         response.addHeader("Access-Control-Allow-Origin", "*");
         return response;
