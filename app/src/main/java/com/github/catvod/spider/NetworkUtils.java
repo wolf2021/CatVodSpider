@@ -8,6 +8,8 @@ import javax.net.ssl.HttpsURLConnection;
 
 public class NetworkUtils {
 
+    private static final int READ_BUFFER_SIZE = 16 * 1024;
+
     public static class HttpResult {
         public int code = -1;
         public String body = "";
@@ -53,8 +55,8 @@ public class NetworkUtils {
                 int responseCode = conn.getResponseCode();
                 if (responseCode == 200) {
                     InputStream is = conn.getInputStream();
-                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                    byte[] buffer = new byte[1024];
+                    ByteArrayOutputStream baos = new ByteArrayOutputStream(initialBufferSize(conn));
+                    byte[] buffer = new byte[READ_BUFFER_SIZE];
                     int len;
                     while ((len = is.read(buffer)) != -1) {
                         baos.write(buffer, 0, len);
@@ -111,8 +113,8 @@ public class NetworkUtils {
             result.code = conn.getResponseCode();
             InputStream is = result.isOk() ? conn.getInputStream() : conn.getErrorStream();
             if (is != null) {
-                ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                byte[] buffer = new byte[1024];
+                ByteArrayOutputStream baos = new ByteArrayOutputStream(initialBufferSize(conn));
+                byte[] buffer = new byte[READ_BUFFER_SIZE];
                 int len;
                 while ((len = is.read(buffer)) != -1) {
                     baos.write(buffer, 0, len);
@@ -127,6 +129,12 @@ public class NetworkUtils {
             if (conn != null) conn.disconnect();
         }
         return result;
+    }
+
+    private static int initialBufferSize(HttpURLConnection conn) {
+        int length = conn != null ? conn.getContentLength() : -1;
+        if (length > 0) return Math.min(length, 1024 * 1024);
+        return READ_BUFFER_SIZE;
     }
 
     public static String getLocalIpAddress() {

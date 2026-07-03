@@ -57,6 +57,7 @@ public class DanmakuSpider extends Spider {
             }
         }
         SharedPreferencesService.clearSearchKeywordCache(context);
+        DanmakuXmlCache.clear();
         DanmakuScanner.lastDetectedTitle = "";
         DanmakuSpider.resetAutoSearch();
     }
